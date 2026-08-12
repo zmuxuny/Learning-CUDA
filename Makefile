@@ -24,10 +24,11 @@ ifeq ($(PLATFORM),nvidia)
 	PLATFORM_DEFINE := -DPLATFORM_NVIDIA
 else ifeq ($(PLATFORM),iluvatar)
     CC          	:= clang++
-	CFLAGS          := -std=c++17 -O3
+	COREX_ROOT    ?= /usr/local/corex
+	CFLAGS          := -std=c++17 -O3 -I$(COREX_ROOT)/include
     TEST_OBJ    	:= tester/tester_iluvatar.o
 	PLATFORM_DEFINE := -DPLATFORM_ILUVATAR
-	EXTRA_LIBS		:= -lcudart -I/usr/local/corex/include -L/usr/local/corex/lib64 -fPIC
+	EXTRA_LIBS		:= -L$(COREX_ROOT)/lib64 -lcudart -Wl,-rpath,$(COREX_ROOT)/lib64 -fPIC
 else ifeq ($(PLATFORM),moore)
     CC          	:= mcc
 	CFLAGS          := -std=c++11 -O3
