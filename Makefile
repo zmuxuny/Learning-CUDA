@@ -34,12 +34,14 @@ else ifeq ($(PLATFORM),iluvatar)
 	PLATFORM_DEFINE := -DPLATFORM_ILUVATAR
 	EXTRA_LIBS		:= -L$(COREX_ROOT)/lib64 -lcudart -Wl,-rpath,$(COREX_ROOT)/lib64 -fPIC
 else ifeq ($(PLATFORM),moore)
-    CC          	:= mcc
-	CFLAGS          := -std=c++11 -O3
+    MUSA_ROOT    ?= /usr/local/musa
+    CC           	:= $(MUSA_ROOT)/bin/mcc
+	CFLAGS          := -std=c++11 -O3 -I$(MUSA_ROOT)/include
     TEST_OBJ    	:= tester/tester_moore.o
 	STUDENT_SUFFIX  := mu
 	PLATFORM_DEFINE := -DPLATFORM_MOORE
-	EXTRA_LIBS		:= -I/usr/local/musa/include -L/usr/lib/gcc/x86_64-linux-gnu/11/ -L/usr/local/musa/lib -lmusart
+	EXTRA_LIBS		:= -L$(MUSA_ROOT)/lib -lmusart -Wl,-rpath,$(MUSA_ROOT)/lib
+	PLATFORM_RUN_ENV := LD_LIBRARY_PATH=$(MUSA_ROOT)/lib:$${LD_LIBRARY_PATH:-}
 else ifeq ($(PLATFORM),metax)
 	MACA_ROOT    ?= /opt/maca
 	CC          	:= $(MACA_ROOT)/mxgpu_llvm/bin/mxcc
