@@ -1,3 +1,5 @@
+// Moore Threads MUSA implementation. The same reference algorithms are
+// compiled by mcc and use musa* runtime calls on the MTT accelerator.
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
@@ -10,6 +12,8 @@
 // the CUDA version while using the MUSA runtime and half-precision helpers.
 // Keeping the conversion logic in one place also makes float/half behavior
 // consistent across RMSNorm and attention.
+// Keep accumulation in float for both float and half inputs. The specialized
+// half conversions avoid relying on implicit device-side casts.
 template <typename T>
 __device__ __forceinline__ float to_float(T value) {
   return static_cast<float>(value);
@@ -20,6 +24,7 @@ __device__ __forceinline__ float to_float<half>(half value) {
   return __half2float(value);
 }
 
+// Convert the float accumulator back to MUSA's requested output type.
 template <typename T>
 __device__ __forceinline__ T from_float(float value) {
   return static_cast<T>(value);
@@ -30,9 +35,9 @@ __device__ __forceinline__ half from_float<half>(float value) {
   return __float2half(value);
 }
 
-template <typename T>
 // One block handles one token row. Shared-memory reduction computes the mean
 // square before every thread writes its normalized elements.
+template <typename T>
 __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
                               size_t rows, size_t hidden_dim, float eps) {
   const size_t row = static_cast<size_t>(blockIdx.x);
@@ -68,8 +73,8 @@ __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
   }
 }
 
-// Copy the host tensors to MUSA memory, launch the row-wise reduction kernel,
-// then copy the normalized result back to the caller-owned vector.
+// Allocate MUSA buffers, transfer the host tensors, execute RMSNorm, and copy
+// the synchronized result back to the caller-owned host vector.
 template <typename T>
 void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
              std::vector<T>& h_output, size_t rows, size_t hidden_dim,

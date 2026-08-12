@@ -1,3 +1,5 @@
+// MetaX MACA implementation for the C500 accelerator. It mirrors the CUDA
+// algorithm but uses MACA half-precision helpers and the mc* runtime API.
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
@@ -24,6 +26,8 @@
  * @param[in] hidden_dim Size of the normalized dimension.
  * @param[in] eps Numerical stability epsilon.
  */
+// Convert values to float for stable accumulation, then convert results back
+// to the requested type at the output boundary.
 template <typename T>
 __device__ __forceinline__ float to_float(T value) {
   return static_cast<float>(value);
@@ -34,6 +38,7 @@ __device__ __forceinline__ float to_float<half>(half value) {
   return __half2float(value);
 }
 
+// Convert the float accumulator back to MACA's requested output type.
 template <typename T>
 __device__ __forceinline__ T from_float(float value) {
   return static_cast<T>(value);
@@ -44,6 +49,8 @@ __device__ __forceinline__ half from_float<half>(float value) {
   return __float2half(value);
 }
 
+// One block owns one row and reduces the mean square in shared memory before
+// applying the learned weight vector.
 template <typename T>
 __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
                               size_t rows, size_t hidden_dim, float eps) {
@@ -80,6 +87,8 @@ __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
   }
 }
 
+// Manage MACA device memory around the RMSNorm kernel and return the result to
+// the host-side vector used by the common tester.
 template <typename T>
 void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
               std::vector<T>& h_output, size_t rows, size_t hidden_dim,
@@ -130,6 +139,8 @@ void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
  * @param[in] head_dim Dimension size of each attention head
  * @param[in] is_causal Whether to apply causal masking
  */
+// One thread produces one output component. The max-shifted softmax keeps the
+// reference implementation stable while supporting causal attention and GQA.
 template <typename T>
 __global__ void flashAttentionKernel(
     const T* q, const T* k, const T* v, T* o, int batch_size,
@@ -196,6 +207,8 @@ __global__ void flashAttentionKernel(
   o[output_index] = from_float<T>(result / denominator);
 }
 
+// Transfer attention inputs through the MACA runtime, launch the kernel, and
+// copy the completed output tensor back to host memory.
 template <typename T>
 void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
                     const std::vector<T>& h_v, std::vector<T>& h_o,

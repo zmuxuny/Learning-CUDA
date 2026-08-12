@@ -20,6 +20,8 @@ PLATFORM_RUN_ENV :=
 EXTRA_LIBS     	:= 
 
 # Compiler & Tester object selection based on PLATFORM
+# NVIDIA and Iluvatar/天数 both use src/kernels.cu. Their runtime/compiler
+# differences are isolated in the tester object and platform flags below.
 ifeq ($(PLATFORM),nvidia)
     CC          	:= nvcc
     TEST_OBJ    	:= tester/tester_nv.o

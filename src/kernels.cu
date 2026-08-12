@@ -1,3 +1,6 @@
+// CUDA implementation used by both NVIDIA and the CUDA-compatible Iluvatar
+// (天玑/天数) build targets. Platform-specific runtime calls are selected
+// through tester/utils.h and the Makefile.
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
@@ -25,6 +28,8 @@
  * @param[in] hidden_dim Size of the normalized dimension.
  * @param[in] eps Numerical stability epsilon.
  */
+// Device-side conversion helpers keep arithmetic in float while allowing the
+// public kernels to be instantiated for both float and half.
 template <typename T>
 __device__ __forceinline__ float to_float(T value) {
   return static_cast<float>(value);
@@ -35,6 +40,7 @@ __device__ __forceinline__ float to_float<half>(half value) {
   return __half2float(value);
 }
 
+// Convert the float accumulator back to the requested output type.
 template <typename T>
 __device__ __forceinline__ T from_float(float value) {
   return static_cast<T>(value);
@@ -45,6 +51,8 @@ __device__ __forceinline__ half from_float<half>(float value) {
   return __float2half(value);
 }
 
+// One CUDA block processes one row. The shared-memory reduction produces the
+// RMS scale before each thread writes its normalized elements.
 template <typename T>
 __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
                               size_t rows, size_t hidden_dim, float eps) {
@@ -80,6 +88,8 @@ __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
   }
 }
 
+// Allocate device buffers, launch RMSNorm, and copy the result back to the
+// host vector supplied by the tester.
 template <typename T>
 void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
               std::vector<T>& h_output, size_t rows, size_t hidden_dim,
@@ -130,6 +140,8 @@ void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
  * @param[in] head_dim Dimension size of each attention head
  * @param[in] is_causal Whether to apply causal masking
  */
+// Each thread computes one output element. The two-pass softmax uses the
+// maximum score as a numerical shift and supports causal masking and GQA.
 template <typename T>
 __global__ void flashAttentionFallbackKernel(
     const T* q, const T* k, const T* v, T* o, int batch_size,
@@ -199,6 +211,8 @@ __global__ void flashAttentionFallbackKernel(
   o[output_index] = from_float<T>(result / denominator);
 }
 
+// Host wrapper for FlashAttention: transfer Q/K/V, launch the fallback kernel,
+// synchronize for deterministic tester results, and copy O back to the host.
 template <typename T>
 void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
                     const std::vector<T>& h_v, std::vector<T>& h_o,
