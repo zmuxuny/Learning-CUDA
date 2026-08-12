@@ -16,6 +16,7 @@ PLATFORM_DEFINE ?= -DPLATFORM_NVIDIA
 STUDENT_SUFFIX  := cu
 CFLAGS          := -std=c++17 -O0
 PLATFORM_COMPILE_FLAGS :=
+PLATFORM_RUN_ENV :=
 EXTRA_LIBS     	:= 
 
 # Compiler & Tester object selection based on PLATFORM
@@ -28,6 +29,7 @@ else ifeq ($(PLATFORM),iluvatar)
 	CC          	:= $(COREX_ROOT)/bin/clang++
 	CFLAGS          := -std=c++17 -O3 -I$(COREX_ROOT)/include
 	PLATFORM_COMPILE_FLAGS := -x ivcore
+	PLATFORM_RUN_ENV := LD_LIBRARY_PATH=$(COREX_ROOT)/lib64:$${LD_LIBRARY_PATH:-}
     TEST_OBJ    	:= tester/tester_iluvatar.o
 	PLATFORM_DEFINE := -DPLATFORM_ILUVATAR
 	EXTRA_LIBS		:= -L$(COREX_ROOT)/lib64 -lcudart -Wl,-rpath,$(COREX_ROOT)/lib64 -fPIC
@@ -85,7 +87,7 @@ run: $(TARGET)
 	else \
 	    echo "=== Verbose mode: Disabled ==="; \
 	fi
-	./$(TARGET) $(VERBOSE_ARG)
+	$(PLATFORM_RUN_ENV) ./$(TARGET) $(VERBOSE_ARG)
 
 # Clean target: Delete temporary files (executable + src object)
 clean:
