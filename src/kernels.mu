@@ -68,6 +68,8 @@ __global__ void rmsNormKernel(const T* input, const T* weight, T* output,
   }
 }
 
+// Copy the host tensors to MUSA memory, launch the row-wise reduction kernel,
+// then copy the normalized result back to the caller-owned vector.
 template <typename T>
 void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
              std::vector<T>& h_output, size_t rows, size_t hidden_dim,
@@ -171,6 +173,8 @@ __global__ void flashAttentionKernel(
   o[output_index] = from_float<T>(result / denominator);
 }
 
+// Compute scaled dot-product attention with optional causal masking. The
+// layout follows the tester: Q is [B,T,H,D], while K/V are [B,S,Hkv,D].
 template <typename T>
 void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
                     const std::vector<T>& h_v, std::vector<T>& h_o,
