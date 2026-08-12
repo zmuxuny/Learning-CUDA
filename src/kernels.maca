@@ -1,3 +1,6 @@
+#include <cfloat>
+#include <cmath>
+#include <cstddef>
 #include <vector>
 #include <common/maca_fp16.h>
 
@@ -22,10 +25,93 @@
  * @param[in] eps Numerical stability epsilon.
  */
 template <typename T>
+__device__ __forceinline__ float to_float(T value) {
+  return static_cast<float>(value);
+}
+
+template <>
+__device__ __forceinline__ float to_float<half>(half value) {
+  return __half2float(value);
+}
+
+template <typename T>
+__device__ __forceinline__ T from_float(float value) {
+  return static_cast<T>(value);
+}
+
+template <>
+__device__ __forceinline__ half from_float<half>(float value) {
+  return __float2half(value);
+}
+
+template <typename T>
+__global__ void rmsNormKernel(const T* input, const T* weight, T* output,
+                              size_t rows, size_t hidden_dim, float eps) {
+  const size_t row = static_cast<size_t>(blockIdx.x);
+  if (row >= rows) {
+    return;
+  }
+
+  extern __shared__ float partial_sums[];
+  float sum = 0.0f;
+  const size_t row_offset = row * hidden_dim;
+  for (size_t column = threadIdx.x; column < hidden_dim;
+       column += blockDim.x) {
+    const float value = to_float(input[row_offset + column]);
+    sum += value * value;
+  }
+  partial_sums[threadIdx.x] = sum;
+  __syncthreads();
+
+  for (unsigned int stride = blockDim.x / 2; stride != 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      partial_sums[threadIdx.x] += partial_sums[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  const float scale =
+      rsqrtf(partial_sums[0] / static_cast<float>(hidden_dim) + eps);
+  for (size_t column = threadIdx.x; column < hidden_dim;
+       column += blockDim.x) {
+    const float value = to_float(input[row_offset + column]);
+    const float factor = to_float(weight[column]);
+    output[row_offset + column] = from_float<T>(value * scale * factor);
+  }
+}
+
+template <typename T>
 void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
               std::vector<T>& h_output, size_t rows, size_t hidden_dim,
               float eps) {
-  // TODO: Implement the rmsNorm function
+  const size_t input_bytes = rows * hidden_dim * sizeof(T);
+  const size_t weight_bytes = hidden_dim * sizeof(T);
+  h_output.resize(rows * hidden_dim);
+
+  T* d_input = nullptr;
+  T* d_weight = nullptr;
+  T* d_output = nullptr;
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_input), input_bytes));
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_weight), weight_bytes));
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_output), input_bytes));
+
+  RUNTIME_CHECK(mcMemcpy(d_input, h_input.data(), input_bytes,
+                         mcMemcpyHostToDevice));
+  RUNTIME_CHECK(mcMemcpy(d_weight, h_weight.data(), weight_bytes,
+                         mcMemcpyHostToDevice));
+
+  constexpr unsigned int threads = 256;
+  rmsNormKernel<T><<<static_cast<unsigned int>(rows), threads,
+                     threads * sizeof(float)>>>(
+      d_input, d_weight, d_output, rows, hidden_dim, eps);
+  RUNTIME_CHECK(mcGetLastError());
+  RUNTIME_CHECK(mcDeviceSynchronize());
+  RUNTIME_CHECK(mcMemcpy(h_output.data(), d_output, input_bytes,
+                         mcMemcpyDeviceToHost));
+
+  RUNTIME_CHECK(mcFree(d_output));
+  RUNTIME_CHECK(mcFree(d_weight));
+  RUNTIME_CHECK(mcFree(d_input));
 }
 
 /**
@@ -45,11 +131,110 @@ void rmsNorm(const std::vector<T>& h_input, const std::vector<T>& h_weight,
  * @param[in] is_causal Whether to apply causal masking
  */
 template <typename T>
+__global__ void flashAttentionKernel(
+    const T* q, const T* k, const T* v, T* o, int batch_size,
+    int target_seq_len, int src_seq_len, int query_heads, int kv_heads,
+    int head_dim, bool is_causal) {
+  const size_t output_size = static_cast<size_t>(batch_size) * target_seq_len *
+                             query_heads * head_dim;
+  const size_t output_index = static_cast<size_t>(blockIdx.x) * blockDim.x +
+                              threadIdx.x;
+  if (output_index >= output_size) {
+    return;
+  }
+
+  const int dimension = output_index % head_dim;
+  const size_t query_index = output_index / head_dim;
+  const int query_head = query_index % query_heads;
+  const int target_index = query_index / query_heads;
+  const int target_position = target_index % target_seq_len;
+  const int batch = target_index / target_seq_len;
+  const int kv_head = query_head / (query_heads / kv_heads);
+  const float score_scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+  const size_t q_offset =
+      (static_cast<size_t>(batch) * target_seq_len + target_position) *
+          query_heads * head_dim +
+      static_cast<size_t>(query_head) * head_dim;
+
+  float max_score = -FLT_MAX;
+  for (int source_position = 0; source_position < src_seq_len;
+       ++source_position) {
+    if (is_causal && source_position > target_position) {
+      continue;
+    }
+    const size_t k_offset =
+        (static_cast<size_t>(batch) * src_seq_len + source_position) *
+            kv_heads * head_dim +
+        static_cast<size_t>(kv_head) * head_dim;
+    float score = 0.0f;
+    for (int d = 0; d < head_dim; ++d) {
+      score += to_float(q[q_offset + d]) * to_float(k[k_offset + d]);
+    }
+    max_score = fmaxf(max_score, score * score_scale);
+  }
+
+  float denominator = 0.0f;
+  float result = 0.0f;
+  for (int source_position = 0; source_position < src_seq_len;
+       ++source_position) {
+    if (is_causal && source_position > target_position) {
+      continue;
+    }
+    const size_t k_offset =
+        (static_cast<size_t>(batch) * src_seq_len + source_position) *
+            kv_heads * head_dim +
+        static_cast<size_t>(kv_head) * head_dim;
+    const size_t v_offset = k_offset;
+    float score = 0.0f;
+    for (int d = 0; d < head_dim; ++d) {
+      score += to_float(q[q_offset + d]) * to_float(k[k_offset + d]);
+    }
+    const float weight = expf(score * score_scale - max_score);
+    denominator += weight;
+    result += weight * to_float(v[v_offset + dimension]);
+  }
+  o[output_index] = from_float<T>(result / denominator);
+}
+
+template <typename T>
 void flashAttention(const std::vector<T>& h_q, const std::vector<T>& h_k,
                     const std::vector<T>& h_v, std::vector<T>& h_o,
-                    int batch_size, int target_seq_len, int src_seq_len, 
-                    int query_heads, int kv_heads, int head_dim, bool is_causal) {       
-  // TODO: Implement the flash attention function
+                    int batch_size, int target_seq_len, int src_seq_len,
+                    int query_heads, int kv_heads, int head_dim,
+                    bool is_causal) {
+  const size_t q_size = static_cast<size_t>(batch_size) * target_seq_len *
+                        query_heads * head_dim;
+  const size_t kv_size = static_cast<size_t>(batch_size) * src_seq_len *
+                         kv_heads * head_dim;
+  const size_t q_bytes = q_size * sizeof(T);
+  const size_t kv_bytes = kv_size * sizeof(T);
+  h_o.resize(q_size);
+
+  T* d_q = nullptr;
+  T* d_k = nullptr;
+  T* d_v = nullptr;
+  T* d_o = nullptr;
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_q), q_bytes));
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_k), kv_bytes));
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_v), kv_bytes));
+  RUNTIME_CHECK(mcMalloc(reinterpret_cast<void**>(&d_o), q_bytes));
+  RUNTIME_CHECK(mcMemcpy(d_q, h_q.data(), q_bytes, mcMemcpyHostToDevice));
+  RUNTIME_CHECK(mcMemcpy(d_k, h_k.data(), kv_bytes, mcMemcpyHostToDevice));
+  RUNTIME_CHECK(mcMemcpy(d_v, h_v.data(), kv_bytes, mcMemcpyHostToDevice));
+
+  constexpr unsigned int threads = 256;
+  const size_t blocks = (q_size + threads - 1) / threads;
+  flashAttentionKernel<T><<<static_cast<unsigned int>(blocks), threads>>>(
+      d_q, d_k, d_v, d_o, batch_size, target_seq_len, src_seq_len,
+      query_heads, kv_heads, head_dim, is_causal);
+  RUNTIME_CHECK(mcGetLastError());
+  RUNTIME_CHECK(mcDeviceSynchronize());
+  RUNTIME_CHECK(mcMemcpy(h_o.data(), d_o, q_bytes, mcMemcpyDeviceToHost));
+
+  RUNTIME_CHECK(mcFree(d_o));
+  RUNTIME_CHECK(mcFree(d_v));
+  RUNTIME_CHECK(mcFree(d_k));
+  RUNTIME_CHECK(mcFree(d_q));
 }
 
 // *********************************************************************

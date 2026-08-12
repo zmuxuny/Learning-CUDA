@@ -41,10 +41,14 @@ else ifeq ($(PLATFORM),moore)
 	PLATFORM_DEFINE := -DPLATFORM_MOORE
 	EXTRA_LIBS		:= -I/usr/local/musa/include -L/usr/lib/gcc/x86_64-linux-gnu/11/ -L/usr/local/musa/lib -lmusart
 else ifeq ($(PLATFORM),metax)
-    CC          	:= mxcc
-    TEST_OBJ    	:= tester/tester_metax.o
+	MACA_ROOT    ?= /opt/maca
+	CC          	:= $(MACA_ROOT)/mxgpu_llvm/bin/mxcc
+	CFLAGS          := -std=c++17 -O3 -I$(MACA_ROOT)/include
+	TEST_OBJ    	:= tester/tester_metax.o
 	STUDENT_SUFFIX  := maca
 	PLATFORM_DEFINE := -DPLATFORM_METAX
+	EXTRA_LIBS		:= -L$(MACA_ROOT)/lib -lmcruntime -Wl,-rpath,$(MACA_ROOT)/lib
+	PLATFORM_RUN_ENV := LD_LIBRARY_PATH=$(MACA_ROOT)/lib:$${LD_LIBRARY_PATH:-}
 else
     $(error Unsupported PLATFORM '$(PLATFORM)' (expected: nvidia, iluvatar, moore, metax))
 endif
