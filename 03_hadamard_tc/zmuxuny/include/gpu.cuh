@@ -1,21 +1,7 @@
 #pragma once
-#include "numeric.cuh"
+#include "vector.cuh"
 
 namespace lp {
-struct Layout {
-  size_t rows, cols;
-  int dtype, fmt, block;
-  bool tensor, stochastic;
-  uint32_t seed;
-  size_t count() const { return rows * cols; }
-  size_t groups() const { return tensor ? 1 : rows * ((cols + block - 1) / block); }
-  size_t bytes() const { return fmt == MXFP8 ? count() : rows * ((cols + 1) / 2); }
-};
-__device__ inline float warp_max(float x, int width = 32) {
-  for (int s = width / 2; s; s /= 2)
-    x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, s, width));
-  return x;
-}
 __global__ void maximum(const void *x, size_t n, int dtype, float *result) {
   float a = 0;
   for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < n;
@@ -160,24 +146,41 @@ __global__ void dequant_blocks_kernel(const uint8_t *data, const uint8_t *scales
     save(out, row * p.cols + col + 1, (fp4_value(code >> 4) * s) * global, out_type);
 }
 
+template <int FMT>
+inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
+                                const float *amax, Layout p) {
+  constexpr int V = 4, THREADS = 128;
+  size_t blocks = (p.count() + V * THREADS - 1) / (V * THREADS);
+  if (p.dtype == FP32)
+    quant_vector_kernel<FMT, FP32, V><<<blocks, THREADS>>>(x, data, scales, amax, p);
+  else if (p.dtype == FP16)
+    quant_vector_kernel<FMT, FP16, V><<<blocks, THREADS>>>(x, data, scales, amax, p);
+  else
+    quant_vector_kernel<FMT, BF16, V><<<blocks, THREADS>>>(x, data, scales, amax, p);
+}
+
 inline void launch_max(const void *x, size_t n, int dtype, float *amax) {
   cudaMemsetAsync(amax, 0, sizeof(float));
-  maximum<<<min(size_t(256), (n + 255) / 256), 256>>>(x, n, dtype, amax);
+  size_t blocks = min(size_t(512), (n + 2047) / 2048);
+  if (dtype == FP32)
+    maximum_vector<FP32, 8><<<blocks, 256>>>(x, n, amax);
+  else if (dtype == FP16)
+    maximum_vector<FP16, 8><<<blocks, 256>>>(x, n, amax);
+  else
+    maximum_vector<BF16, 8><<<blocks, 256>>>(x, n, amax);
 }
-inline void quantize(const void *x, uint8_t *data, uint8_t *scales, float *amax,
-                     Layout p) {
-  if (p.fmt == NVFP4 || p.tensor)
-    launch_max(x, p.count(), p.dtype, amax);
+// Reuse an already computed tensor maximum (e.g. a fused transform+amax).
+inline void quantize_with_amax(const void *x, uint8_t *data, uint8_t *scales,
+                               float *amax, Layout p) {
   if (p.rows <= 2147483647 && (p.cols + 255) / 256 <= 65535 &&
       p.block == (p.fmt == MXFP8 ? 32 : 16)) {
     if (p.tensor)
       scales_kernel<<<1, 256>>>(x, scales, amax, p);
     if (p.cols % p.block == 0) {
-      size_t blocks = (p.count() + 255) / 256;
       if (p.fmt == MXFP8)
-        quant_blocks_kernel<MXFP8, true><<<blocks, 256>>>(x, data, scales, amax, p);
+        launch_quant_vector<MXFP8>(x, data, scales, amax, p);
       else
-        quant_blocks_kernel<NVFP4, true><<<blocks, 256>>>(x, data, scales, amax, p);
+        launch_quant_vector<NVFP4>(x, data, scales, amax, p);
       return;
     }
     dim3 grid(p.rows, (p.cols + 255) / 256);
@@ -190,18 +193,34 @@ inline void quantize(const void *x, uint8_t *data, uint8_t *scales, float *amax,
   scales_kernel<<<(p.groups() + 7) / 8, 256>>>(x, scales, amax, p);
   quant_kernel<<<(p.bytes() + 255) / 256, 256>>>(x, data, scales, amax, p);
 }
+inline void quantize(const void *x, uint8_t *data, uint8_t *scales, float *amax,
+                     Layout p) {
+  if (p.fmt == NVFP4 || p.tensor)
+    launch_max(x, p.count(), p.dtype, amax);
+  quantize_with_amax(x, data, scales, amax, p);
+}
+template <int FMT>
+inline void launch_dequant_vector(const uint8_t *data, const uint8_t *scales,
+                                  float global, void *out, int out_type, Layout p) {
+  if (out_type == FP32)
+    dequant_vector_kernel<FMT, FP32, 4>
+        <<<(p.count() + 1023) / 1024, 256>>>(data, scales, global, out, p);
+  else if (out_type == FP16)
+    dequant_vector_kernel<FMT, FP16, 8>
+        <<<(p.count() + 1023) / 1024, 128>>>(data, scales, global, out, p);
+  else
+    dequant_vector_kernel<FMT, BF16, 8>
+        <<<(p.count() + 1023) / 1024, 128>>>(data, scales, global, out, p);
+}
 inline void dequantize(const uint8_t *data, const uint8_t *scales, float global,
                        void *out, int out_type, Layout p) {
   if (p.rows <= 2147483647 && (p.cols + 255) / 256 <= 65535 &&
       p.block == (p.fmt == MXFP8 ? 32 : 16)) {
     if (p.cols % p.block == 0) {
-      size_t blocks = (p.bytes() + 255) / 256;
       if (p.fmt == MXFP8)
-        dequant_blocks_kernel<MXFP8, true>
-            <<<blocks, 256>>>(data, scales, global, out, out_type, p);
+        launch_dequant_vector<MXFP8>(data, scales, global, out, out_type, p);
       else
-        dequant_blocks_kernel<NVFP4, true>
-            <<<blocks, 256>>>(data, scales, global, out, out_type, p);
+        launch_dequant_vector<NVFP4>(data, scales, global, out, out_type, p);
       return;
     }
     size_t bytes_per_row = p.fmt == MXFP8 ? p.cols : (p.cols + 1) / 2;

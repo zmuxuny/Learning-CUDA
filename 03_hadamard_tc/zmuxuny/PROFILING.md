@@ -1,3 +1,38 @@
+# 第二轮检查与采样入口
+
+第二轮使用当前软件版和独立的原生 FP8 对照，详见 [最新性能报告](REPORT_TUNING.md)。每路各执行 18 次 memcheck、racecheck、synccheck；题目 2 增加了整块对齐向量访问、FP32/FP16 输入和 BF16 输出，题目 3 同时覆盖 NVFP4 中间结果保留对照。
+
+- [软件版检查状态](results/4090d/tuning/software/profiling.json) 与 [原生对照状态](results/4090d/tuning/native/profiling.json)。
+- [软件版 MXFP8 汇总](results/4090d/tuning/software/nsys_stats_mxfp8.csv)、[NVFP4 汇总](results/4090d/tuning/software/nsys_stats_nvfp4.csv)。
+- [原生版 MXFP8 汇总](results/4090d/tuning/native/nsys_stats_mxfp8.csv)、[NVFP4 汇总](results/4090d/tuning/native/nsys_stats_nvfp4.csv)。
+- 两路目录各保存可由 Nsight Systems GUI 打开的 `timeline_*.nsys-rep`、静态资源报告 `resources.txt`、转换指令反汇编 `conversion_instructions.txt`；题目 3 另保留 `tensor_core_instructions.txt`。
+
+FP8 原生对照的反汇编包含 `F2FP.SATFINITE.E4M3.F32`，默认软件版不含该指令；BF16 原生转换为 `F2FP.BF16.F32`，对应代码保留旧架构的软件回退。Nsight Compute 的计数器权限仍由宿主机限制，原始错误保存在各目录 `ncu.txt`。
+
+```bash
+python3 tests/profile_native.py --output results/4090d/tuning/software
+python3 tests/profile_native.py --binary build/hadamard_native --output results/4090d/tuning/native
+```
+
+## 第二轮时间线分析
+
+采样输入为 8192×128 FP16，开启随机符号。以下为分解 Tensor Core kernel 的带插桩平均时间，单位 μs；性能结论使用报告中的无插桩 CUDA event 测量。
+
+| 阶段 | 软件 FP8 编码 | 原生 FP8 对照 |
+| --- | --- | --- |
+| 单独 Hadamard，MXFP8 试验 | 2.985 | 2.998 |
+| Hadamard + MXFP8 融合输出 | 4.024 | 3.467 |
+| NVFP4 变换后 amax 预遍历 | 2.638 | 2.648 |
+| Hadamard + NVFP4 融合输出 | 5.023 | 4.964 |
+
+原生 FP8 转换主要减少 MXFP8 融合输出中的编码计算，单独变换与 NVFP4 的 amax 预遍历基本不变。NVFP4 仍需两次变换和清零，E2M1 数据编码也是软件实现，因此 E4M3 scale 的硬件转换只改善其中一小部分。单独变换记录 46 次调用，来自单独测试和非融合测试；融合输出及 amax 各 23 次，包括 3 次预热和 20 次重复。表中 kernel 平均时间之和不含全部启动间隔与清零，不能代替完整融合延迟。
+
+软件融合在 D=128 使用 32–37 个寄存器、D=1024 使用 56–64 个寄存器，无 local-memory 分配和栈帧；本轮加速主要来自指令与访问方式变化，并没有把静态寄存器数量下降当作前提。NVFP4 的中间结果保留对照在无插桩基准与 Sanitizer 中单独运行，默认时间线保持重算式融合。
+
+以下为第一轮已归档检查与分析。
+
+---
+
 # RTX 4090 D：已完成的工具检查
 
 2026-09-19 在原生 Linux 容器、CUDA 12.8、驱动 570.124.06 上完成。Profiler 为题目加分项；Compute Sanitizer 未被题目列为硬性提交条件，本版已补齐真实检查。

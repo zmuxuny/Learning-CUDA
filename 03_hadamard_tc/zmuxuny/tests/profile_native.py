@@ -38,6 +38,11 @@ def main():
         default=shutil.which("compute-sanitizer")
         or "/usr/local/cuda/compute-sanitizer/compute-sanitizer",
     )
+    p.add_argument(
+        "--binary",
+        type=Path,
+        default=ROOT / ("build/hadamard" if HADAMARD else "build/quantize"),
+    )
     args = p.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -52,7 +57,7 @@ def main():
                 dtype,
             )
             cmd = [
-                ROOT / ("build/hadamard" if HADAMARD else "build/quantize"),
+                args.binary.resolve(),
                 "--input",
                 t / "input.bin",
                 "--output",
@@ -73,11 +78,18 @@ def main():
         shapes = (
             [(19, 128, 1), (35, 1024, 1), (35, 1024, 2)]
             if HADAMARD
-            else [(19, 35, 0), (1031, 1025, 1)]
+            else [(19, 35, 0), (1031, 1025, 1), (35, 1024, 0), (35, 1024, 1)]
         )
         for rows, cols, dtype in shapes:
             for fmt in ["mxfp8", "nvfp4"]:
                 cmd = command(rows, cols, dtype, fmt)
+                if HADAMARD:
+                    cmd += ["--materialized_compare", "1"]
+                elif rows == 35 and dtype == 1:
+                    (t / "config").write_text(
+                        f'format = "{fmt}"\noutput_type = "bf16"\n'
+                    )
+                    cmd[-1] = t / "config"
                 for tool in ["memcheck", "racecheck", "synccheck"]:
                     key = f"{tool}_{rows}x{cols}_dtype{dtype}_{fmt}"
                     status[key] = capture(
@@ -130,27 +142,33 @@ def main():
                     ],
                     out / f"nsys_stats_{fmt}.csv",
                 )
+        sass = subprocess.run(
+            ["/usr/local/cuda/bin/cuobjdump", "--dump-sass", args.binary.resolve()],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        groups = {"conversion_instructions.txt": []}
         if HADAMARD:
-            p = subprocess.run(
-                [
-                    "/usr/local/cuda/bin/cuobjdump",
-                    "--dump-sass",
-                    ROOT / "build/hadamard",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            selected = []
-            function = ""
-            for line in p.stdout.splitlines():
-                if "Function :" in line:
-                    function = line.strip()
-                if "HMMA." in line:
-                    selected += [function, line.rstrip()]
-            (out / "tensor_core_instructions.txt").write_text(
-                "\n".join(selected) + "\n"
-            )
+            groups["tensor_core_instructions.txt"] = []
+        function = ""
+        for line in sass.splitlines():
+            if "Function :" in line:
+                function = line.strip()
+            if "E4M3" in line or "BF16.F32" in line:
+                groups["conversion_instructions.txt"] += [function, line.rstrip()]
+            if HADAMARD and "HMMA." in line:
+                groups["tensor_core_instructions.txt"] += [function, line.rstrip()]
+        for filename, lines in groups.items():
+            (out / filename).write_text("\n".join(lines) + "\n")
+        status["resources"] = capture(
+            [
+                "/usr/local/cuda/bin/cuobjdump",
+                "--dump-resource-usage",
+                args.binary.resolve(),
+            ],
+            out / "resources.txt",
+        )
         status["environment"] = capture(["nvidia-smi", "-q"], out / "nvidia-smi.txt")
     (out / "profiling.json").write_text(json.dumps(status, indent=2) + "\n")
     failures = [

@@ -35,7 +35,7 @@ template <int TYPE> __device__ __forceinline__ unsigned h_pair(int k, int column
   return lo | (hi << 16);
 }
 
-template <int D, int TYPE, int MODE, int FMT>
+template <int D, int TYPE, int MODE, int FMT, int WARPS = 4>
 __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
                                     bool normalize, bool signs, uint32_t seed,
                                     uint8_t *data, uint8_t *scales, float *amax,
@@ -43,9 +43,9 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
   constexpr int TILES = D > 256 ? D / 256 : 1;
   constexpr int ITEMS = D > 256 ? D : 256;
   int lane = threadIdx.x & 31, group = lane >> 2, pair = (lane & 3) * 2;
-  size_t start = (size_t(blockIdx.x) * 4 + threadIdx.x / 32) * ITEMS;
+  size_t start = (size_t(blockIdx.x) * WARPS + threadIdx.x / 32) * ITEMS;
   // Every lane must participate in MMA, including zero-padded tail rows.
-  if (start >= n && MODE != 1)
+  if (start >= n && MODE != 1 && MODE != 3)
     return;
   float v[TILES][8];
   unsigned b00 = h_pair<TYPE>(pair, group), b01 = h_pair<TYPE>(pair + 8, group);
@@ -110,7 +110,7 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
     for (int j = 0; j < 8; ++j)
       v[t][j] =
           MODE == 0 ? v[t][j] * normalization : cast(v[t][j] * normalization, TYPE);
-  if constexpr (MODE == 1) {
+  if constexpr (MODE == 1 || MODE == 3) {
     float a = 0;
 #pragma unroll
     for (int t = 0; t < TILES; ++t)
@@ -118,16 +118,17 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
       for (int j = 0; j < 8; ++j)
         a = fmaxf(a, fabsf(v[t][j]));
     a = warp_max(a);
-    __shared__ float maxima[4];
+    __shared__ float maxima[WARPS];
     if (lane == 0)
       maxima[threadIdx.x / 32] = a;
     __syncthreads();
     if (threadIdx.x < 32) {
-      a = warp_max(lane < 4 ? maxima[lane] : 0.0f);
+      a = warp_max(lane < WARPS ? maxima[lane] : 0.0f);
       if (lane == 0)
         atomicMax(reinterpret_cast<unsigned *>(amax), __float_as_uint(a));
     }
-  } else if constexpr (MODE == 2) {
+  }
+  if constexpr (MODE == 2) {
     constexpr int B = FMT == MXFP8 ? 32 : 16;
     constexpr int GROUPS_PER_ROW = (D + B - 1) / B;
     float global = FMT == NVFP4 ? global_scale(*amax) : 1.0f;
@@ -151,16 +152,29 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
         for (int upper = 0; upper < 2; ++upper) {
           size_t i = base + pair + upper * 8;
           unsigned codes[2];
+#if LP_NATIVE_FP8
+          if constexpr (FMT == MXFP8) {
+            uint16_t pair =
+                encode8_pair(mx_scaled(v[t][j + upper * 4], s),
+                             mx_scaled(v[t][j + upper * 4 + 1], s), p.stochastic,
+                             p.stochastic ? uniform(i, p.seed) : 0,
+                             p.stochastic ? uniform(i + 1, p.seed) : 0);
+            codes[0] = pair & 255;
+            codes[1] = pair >> 8;
+          } else
+#endif
+          {
 #pragma unroll
-          for (int k = 0; k < 2; ++k) {
-            float value = v[t][j + upper * 4 + k];
-            if constexpr (FMT == NVFP4)
-              value /= global;
-            float z =
-                FMT == MXFP8 ? mx_scaled(value, s) : (scale == 0 ? 0 : value / scale);
-            float u = p.stochastic ? uniform(i + k, p.seed) : 0;
-            codes[k] = FMT == MXFP8 ? encode8(z, p.stochastic, u)
-                                    : encode4_scaled(value, scale, p.stochastic, u);
+            for (int k = 0; k < 2; ++k) {
+              float value = v[t][j + upper * 4 + k];
+              if constexpr (FMT == NVFP4)
+                value /= global;
+              float z =
+                  FMT == MXFP8 ? mx_scaled(value, s) : (scale == 0 ? 0 : value / scale);
+              float u = p.stochastic ? uniform(i + k, p.seed) : 0;
+              codes[k] = FMT == MXFP8 ? encode8(z, p.stochastic, u)
+                                      : encode4_scaled(value, scale, p.stochastic, u);
+            }
           }
           if (i < n) {
             if constexpr (FMT == MXFP8)
@@ -172,7 +186,7 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
         }
       }
     }
-  } else {
+  } else if constexpr (MODE != 1) {
 #pragma unroll
     for (int t = 0; t < TILES; ++t) {
 #pragma unroll
@@ -184,8 +198,12 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
           if constexpr (TYPE == FP16) {
             __half2 h = __floats2half2_rn(v[t][j], v[t][j + 1]);
             bits = *reinterpret_cast<unsigned *>(&h);
-          } else
-            bits = unsigned(bf16(v[t][j])) | (unsigned(bf16(v[t][j + 1])) << 16);
+          } else {
+            // PTX packs its first source into the high half, second into low.
+            asm("cvt.rn.bf16x2.f32 %0, %1, %2;"
+                : "=r"(bits)
+                : "f"(v[t][j + 1]), "f"(v[t][j]));
+          }
           *reinterpret_cast<unsigned *>(y + i) = bits;
         }
       }
@@ -245,5 +263,17 @@ inline void fused_had_mma(const void *x, size_t rows, int d, int dtype, bool nor
     launch_had_mma_mode<2, MXFP8>(x, nullptr, rows, d, dtype, norm, signs, seed, data,
                                   scales, amax, p);
 }
+// Two GPU kernels: transform+amax writes the rounded intermediate once;
+// vector quantization consumes it without a second amax or transform pass.
+inline void materialized_had_mma(const void *x, void *scratch, size_t rows, int d,
+                                 int dtype, bool norm, bool signs, uint32_t seed,
+                                 uint8_t *data, uint8_t *scales, float *amax,
+                                 Layout p) {
+  cudaMemsetAsync(amax, 0, sizeof(float));
+  launch_had_mma_mode<3, NVFP4>(x, scratch, rows, d, dtype, norm, signs, seed, nullptr,
+                                nullptr, amax, p);
+  quantize_with_amax(scratch, data, scales, amax, p);
+}
+
 #endif
 } // namespace lp

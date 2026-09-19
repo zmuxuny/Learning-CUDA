@@ -25,6 +25,7 @@ def main():
     baseline = "0a5e40b" if HAD else "73b66de"
     lines = [
         "# RTX 4090 D 优化实验",
+        "\n本页为第一轮已归档结果。最新实现与第二轮对比见 [REPORT_TUNING.md](REPORT_TUNING.md)。",
         "",
         f"实测日期：2026-09-19。基线为本题首版提交 `{baseline}`（与实际构建的本地集成快照 `deba5cb` 对应目录完全相同），优化前后均在同一台 RTX 4090 D 24 GiB 上执行。CUDA 12.8、驱动 570.124.06、GCC 13，编译目标 `sm_89`，使用 `-O3 --fmad=false -lineinfo`。环境和基线可执行文件 SHA256 见 [environment.json](results/4090d/environment.json)。",
         "",

@@ -183,6 +183,26 @@ int main(int argc, char **argv) try {
       throw std::runtime_error("factorized MMA fused/unfused packed mismatch");
     if (!get(o, "factorized_tc_packed").empty())
       write_packed(get(o, "factorized_tc_packed"), tfq);
+    if (p.fmt == NVFP4 && get(o, "materialized_compare", "0") == "1") {
+      double partial = elapsed(
+          [&] {
+            materialized_had_mma(in.ptr, ty.ptr, x.rows, d, x.dtype, norm, signs,
+                                 sign_seed, fdata.as<uint8_t>(), fscales.as<uint8_t>(),
+                                 fmax.as<float>(), p);
+          },
+          repeats);
+      Packed pq = tq;
+      fmax.download(&mf, 4);
+      pq.global = global_scale(mf);
+      fdata.download(pq.data.data(), pq.data.size());
+      fscales.download(pq.scales.data(), pq.scales.size());
+      if (pq.global != tq.global || pq.data != tq.data || pq.scales != tq.scales)
+        throw std::runtime_error("materialized MMA packed mismatch");
+      if (!get(o, "factorized_tc_materialized_packed").empty())
+        write_packed(get(o, "factorized_tc_materialized_packed"), pq);
+      metrics["factorized_tc_materialized_ms"] = partial;
+      metrics["factorized_tc_materialized_speedup"] = tc_separate / partial;
+    }
     metrics["factorized_tc_unfused_ms"] = tc_separate;
     metrics["factorized_tc_fused_ms"] = tc_fused;
     metrics["factorized_tc_fusion_speedup"] = tc_separate / tc_fused;
@@ -201,6 +221,7 @@ int main(int argc, char **argv) try {
     write_packed(get(o, "unfused_packed"), q);
   log_json(required(o, "log"), metrics,
            {{"gpu", gpu_name()},
+            {"fp8_encoding", fp8_encoding_backend()},
             {"format", get(cfg, "format")},
             {"dtype", x.dtype == FP16 ? "fp16" : "bf16"},
             {"normalize", norm ? "true" : "false"},

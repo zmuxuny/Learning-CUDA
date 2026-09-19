@@ -1,3 +1,4 @@
+import argparse
 import itertools
 import json
 from pathlib import Path
@@ -18,6 +19,12 @@ from reference import (
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", type=Path, default=ROOT / "build/hadamard")
+    parser.add_argument(
+        "--output", type=Path, default=ROOT / "results/correctness.json"
+    )
+    args = parser.parse_args()
     cases = list(
         itertools.product(
             [1, 2], [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024], [0, 1], [19]
@@ -44,7 +51,7 @@ def main():
             write_tensor(t / "input", x, dtype)
             x, _ = read_tensor(t / "input")
             command = [
-                str(ROOT / "build/hadamard"),
+                str(args.binary.resolve()),
                 "--input",
                 str(t / "input"),
                 "--output",
@@ -72,6 +79,12 @@ def main():
                 "--factorized_tc_packed",
                 str(t / "mma_packed"),
             ]
+            command += [
+                "--materialized_compare",
+                "1",
+                "--factorized_tc_materialized_packed",
+                str(t / "materialized"),
+            ]
             (t / "mma").unlink(missing_ok=True)
             p = subprocess.run(command, capture_output=True, text=True)
             assert p.returncode == 0, (dtype, d, fmt, p.stdout, p.stderr)
@@ -96,6 +109,8 @@ def main():
                     mma, fmt, 32 if fmt == 0 else 16, stochastic=stochastic
                 )
                 assert_packed(read_packed(t / "mma_packed"), mma_expected)
+                if fmt == 1:
+                    assert_packed(read_packed(t / "materialized"), mma_expected)
                 mma_cases += 1
         write_tensor(t / "input", np.ones((2, 63)), 1)
         p = subprocess.run(command, capture_output=True, text=True)
@@ -112,7 +127,7 @@ def main():
         "factorized_tc_max_abs_error_bf16": mma_maxerr[2],
         "oracle": "NumPy float64 dense Sylvester matrix",
     }
-    (ROOT / "results/correctness.json").write_text(json.dumps(result, indent=2) + "\n")
+    args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
 
 
