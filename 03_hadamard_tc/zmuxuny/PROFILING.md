@@ -1,3 +1,18 @@
+# MetaX C500 采样入口
+
+C500 使用 MACA 自带的 `mcTracer`，已经采集量化、反量化及 Hadamard 各路径的设备时间线。结果见 [C500 报告](REPORT_C500.md) 和 [采样汇总](results/c500/profile/summary.json)，原始 JSON 位于汇总的 `trace` 字段所指文件。
+
+```bash
+export MACA_PATH=/opt/maca
+export LD_LIBRARY_PATH="$MACA_PATH/lib:${LD_LIBRARY_PATH:-}"
+make PLATFORM=metax
+python3 tests/profile_metax.py
+```
+
+性能表使用未插桩设备事件计时；mcTracer 时间用于分析内核组成。本次 C500 镜像没有可用的设备端 Sanitizer，下面归档的 Nsight / Compute Sanitizer 结果对应 NVIDIA 平台。
+
+---
+
 # 第二轮检查与采样入口
 
 第二轮使用当前软件版和独立的原生 FP8 对照，详见 [最新性能报告](REPORT_TUNING.md)。每路各执行 18 次 memcheck、racecheck、synccheck；题目 2 增加了整块对齐向量访问、FP32/FP16 输入和 BF16 输出，题目 3 同时覆盖 NVFP4 中间结果保留对照。

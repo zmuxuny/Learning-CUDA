@@ -41,7 +41,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--repeats", type=int, default=100)
+    p.add_argument("--binary", type=Path, default=ROOT / "build/hadamard")
+    p.add_argument("--output-dir", type=Path, default=ROOT / "results")
+    p.add_argument("--materialized-compare", action="store_true")
     a = p.parse_args()
+    a.output_dir.mkdir(parents=True, exist_ok=True)
     records = []
     with tempfile.TemporaryDirectory(prefix="had-bench-") as tmp:
         t = Path(tmp)
@@ -61,7 +65,9 @@ def main():
                     for _ in range(a.trials):
                         subprocess.run(
                             [
-                                str(ROOT / "build/hadamard"),
+                                str(a.binary.resolve()),
+                                "--materialized_compare",
+                                str(int(a.materialized_compare)),
                                 "--input",
                                 str(t / "input"),
                                 "--output",
@@ -118,7 +124,9 @@ def main():
             for fmt in [0, 1]:
                 subprocess.run(
                     [
-                        str(ROOT / "build/hadamard"),
+                        str(a.binary.resolve()),
+                                "--materialized_compare",
+                                str(int(a.materialized_compare)),
                         "--input",
                         str(t / "input"),
                         "--output",
@@ -152,8 +160,8 @@ def main():
                         ),
                     }
                 )
-    (ROOT / "results/benchmark.json").write_text(json.dumps(records, indent=2) + "\n")
-    (ROOT / "results/rotation_quality.json").write_text(
+    (a.output_dir / "benchmark.json").write_text(json.dumps(records, indent=2) + "\n")
+    (a.output_dir / "rotation_quality.json").write_text(
         json.dumps(quality, indent=2) + "\n"
     )
 

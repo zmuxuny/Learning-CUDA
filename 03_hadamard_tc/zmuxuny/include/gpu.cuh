@@ -102,7 +102,7 @@ __global__ void quant_blocks_kernel(const void *x, uint8_t *data, uint8_t *scale
   if (lane % B == 0)
     code_scale = p.tensor ? scales[0]
                           : (FMT == MXFP8 ? mx_scale(a) : encode8((a / global) / 6.0f));
-  code_scale = __shfl_sync(0xffffffff, code_scale, 0, B);
+  code_scale = __shfl_sync(FULL_WARP_MASK, code_scale, 0, B);
   if (!p.tensor && col < limit && lane % B == 0)
     scales[row * ((p.cols + B - 1) / B) + col / B] = uint8_t(code_scale);
   float scale = scale_value(uint8_t(code_scale), FMT);
@@ -117,7 +117,7 @@ __global__ void quant_blocks_kernel(const void *x, uint8_t *data, uint8_t *scale
     if (col < limit)
       data[row * p.cols + col] = uint8_t(code);
   } else {
-    unsigned hi = __shfl_xor_sync(0xffffffff, code, 1);
+    unsigned hi = __shfl_xor_sync(FULL_WARP_MASK, code, 1);
     if (col < limit && !(lane & 1))
       data[row * ((p.cols + 1) / 2) + col / 2] =
           uint8_t(code | ((col + 1 < limit ? hi : 0) << 4));
@@ -149,7 +149,18 @@ __global__ void dequant_blocks_kernel(const uint8_t *data, const uint8_t *scales
 template <int FMT>
 inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
                                 const float *amax, Layout p) {
+#if defined(__MACACC__)
+  // C500: scalar tiles avoid underfilling small grids; eight values per lane
+  // amortize software encoding and improve large-tensor memory transactions.
+  if (p.count() <= 65536) {
+    quant_blocks_kernel<FMT, true><<<(p.count() + 255) / 256, 256>>>(
+        x, data, scales, amax, p);
+    return;
+  }
+  constexpr int V = 8, THREADS = 256;
+#else
   constexpr int V = 4, THREADS = 128;
+#endif
   size_t blocks = (p.count() + V * THREADS - 1) / (V * THREADS);
   if (p.dtype == FP32)
     quant_vector_kernel<FMT, FP32, V><<<blocks, THREADS>>>(x, data, scales, amax, p);
@@ -162,8 +173,13 @@ inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
 inline void launch_max(const void *x, size_t n, int dtype, float *amax) {
   cudaMemsetAsync(amax, 0, sizeof(float));
   size_t blocks = min(size_t(512), (n + 2047) / 2048);
+#if defined(__MACACC__)
+  constexpr int FP32_VECTOR = 4;
+#else
+  constexpr int FP32_VECTOR = 8;
+#endif
   if (dtype == FP32)
-    maximum_vector<FP32, 8><<<blocks, 256>>>(x, n, amax);
+    maximum_vector<FP32, FP32_VECTOR><<<blocks, 256>>>(x, n, amax);
   else if (dtype == FP16)
     maximum_vector<FP16, 8><<<blocks, 256>>>(x, n, amax);
   else
@@ -202,15 +218,27 @@ inline void quantize(const void *x, uint8_t *data, uint8_t *scales, float *amax,
 template <int FMT>
 inline void launch_dequant_vector(const uint8_t *data, const uint8_t *scales,
                                   float global, void *out, int out_type, Layout p) {
+#if defined(__MACACC__)
+  if (p.count() <= 65536) {
+    dequant_blocks_kernel<FMT, true><<<(p.bytes() + 255) / 256, 256>>>(
+        data, scales, global, out, out_type, p);
+    return;
+  }
+  int half_threads = p.count() <= 1048576 ? 512 : 128;
+#else
+  constexpr int half_threads = 128;
+#endif
   if (out_type == FP32)
     dequant_vector_kernel<FMT, FP32, 4>
         <<<(p.count() + 1023) / 1024, 256>>>(data, scales, global, out, p);
   else if (out_type == FP16)
     dequant_vector_kernel<FMT, FP16, 8>
-        <<<(p.count() + 1023) / 1024, 128>>>(data, scales, global, out, p);
+        <<<(p.count() + 8 * half_threads - 1) / (8 * half_threads), half_threads>>>(
+            data, scales, global, out, p);
   else
     dequant_vector_kernel<FMT, BF16, 8>
-        <<<(p.count() + 1023) / 1024, 128>>>(data, scales, global, out, p);
+        <<<(p.count() + 8 * half_threads - 1) / (8 * half_threads), half_threads>>>(
+            data, scales, global, out, p);
 }
 inline void dequantize(const uint8_t *data, const uint8_t *scales, float global,
                        void *out, int out_type, Layout p) {

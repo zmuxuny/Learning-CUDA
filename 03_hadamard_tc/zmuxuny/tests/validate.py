@@ -33,6 +33,11 @@ def main():
     # Few-row/CTA-boundary cases exercise collective MMA and block reductions
     # with inactive warps. Keep these extra cases normalized.
     cases += list(itertools.product([1, 2], [64, 1024], [0, 1], [1, 2, 31, 32]))
+    # Larger aligned shapes and tails exercise many-CTA reductions and
+    # partially populated final matrix waves, for both device backends.
+    for dtype, fmt in itertools.product([1, 2], [0, 1]):
+        cases += [(dtype, 1024, fmt, rows) for rows in [2047, 2048, 2049]]
+        cases.append((dtype, 64, fmt, 8193))
     maxerr = {1: 0.0, 2: 0.0}
     mma_maxerr = {1: 0.0, 2: 0.0}
     mma_cases = 0

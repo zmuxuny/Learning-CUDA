@@ -13,7 +13,7 @@ struct Layout {
 };
 __device__ inline float warp_max(float x, int width = 32) {
   for (int s = width / 2; s; s /= 2)
-    x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, s, width));
+    x = fmaxf(x, __shfl_xor_sync(FULL_WARP_MASK, x, s, width));
   return x;
 }
 } // namespace lp

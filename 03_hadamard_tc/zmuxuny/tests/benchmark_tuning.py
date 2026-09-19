@@ -34,6 +34,7 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--suite", choices=["small", "large", "all"], default="all")
     p.add_argument("--trials", type=int, default=3)
+    p.add_argument("--baseline-label", default="first optimized 4090 D submission (2026-09-19)")
     a = p.parse_args()
     binaries = {
         k: getattr(a, k).resolve()
@@ -65,11 +66,11 @@ def main():
         large if a.suite != "small" else []
     )
     report = {
-        "baseline": "first optimized 4090 D submission (2026-09-19)",
+        "baseline": a.baseline_label,
         "seed": 42,
         "distribution": "normal",
         "quant_output_dtype": "fp32",
-        "timing": "CUDA events, warmup, all GPU steps; excludes host reference and transfers",
+        "timing": "device runtime events, warmup, all GPU steps; excludes host reference and transfers",
         "binaries": {
             k: {"path": str(v), "sha256": digest(v)} for k, v in binaries.items()
         },

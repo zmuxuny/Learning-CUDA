@@ -1,5 +1,7 @@
 # Hadamard 变换与量化融合
 
+新增 **MetaX C500** 支持：构建使用 `make PLATFORM=metax`，可执行文件位于 `build/metax/`；完整环境、正确性、调优和 mcTracer 证据见 [C500 报告](REPORT_C500.md)。
+
 最新结果见 [RTX 4090 D 第二轮优化报告](REPORT_TUNING.md)：包含向量化量化/反量化、BF16 转换、软件舍入优化，以及独立的原生 FP8 对照。第一轮数据保留在 [4090 D 首轮报告](REPORT_4090D.md)，原 3060 数据保留在 [首版报告](REPORT.md)。
 
 题目 3，提交 ID：`zmuxuny`。实现 FP16/BF16 快速 Walsh-Hadamard 变换、MXFP8/NVFP4 融合量化，以及 FP16/BF16 Tensor Core 分解与融合路径（另保留 FP16 稠密 WMMA 对照）。本目录随附量化、文件读写和独立参考模块，可单独构建、测试和提交。

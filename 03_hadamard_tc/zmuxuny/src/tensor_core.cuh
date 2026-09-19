@@ -5,8 +5,13 @@
 #define LP_CUDA_ARCH 75
 #endif
 
+#if defined(__MACACC__)
+#include "metax_matrix.cuh"
+#endif
+
 namespace lp {
-#if LP_CUDA_ARCH >= 80
+#if defined(__MACACC__) || LP_CUDA_ARCH >= 80
+#if !defined(__MACACC__)
 // Documented PTX m16n8k16 fragment layout, not an opaque WMMA layout assumption.
 // Two MMA instructions transform 16 independent 16-element segments. Remaining
 // Hadamard factors act on the segment index using shuffles and FP32 registers.
@@ -211,6 +216,13 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
   }
 }
 
+#endif // NVIDIA-specific fragment implementation
+#if defined(__MACACC__)
+constexpr int MMA_LANES = 64;
+#else
+constexpr int MMA_LANES = 32;
+#endif
+
 template <int TYPE, int MODE, int FMT>
 inline void launch_had_mma_type(const void *x, void *y, size_t rows, int d, bool norm,
                                 bool signs, uint32_t seed, uint8_t *data,
@@ -219,7 +231,7 @@ inline void launch_had_mma_type(const void *x, void *y, size_t rows, int d, bool
 #define MMA_CASE(D)                                                                    \
   case D:                                                                              \
     hadamard_mma_kernel<D, TYPE, MODE, FMT>                                            \
-        <<<(n + 4 * (D > 256 ? D : 256) - 1) / (4 * (D > 256 ? D : 256)), 128>>>(      \
+        <<<(n + 4 * (D > 256 ? D : 256) - 1) / (4 * (D > 256 ? D : 256)), 4 * MMA_LANES>>>(      \
             static_cast<const uint16_t *>(x), static_cast<uint16_t *>(y), n, norm,     \
             signs, seed, data, scales, amax, p);                                       \
     break
