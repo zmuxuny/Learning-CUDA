@@ -1,6 +1,8 @@
 # Hadamard 变换与量化融合
 
-题目 3，提交 ID：`zmuxuny`。实现 FP16/BF16 快速 Walsh-Hadamard 变换、MXFP8/NVFP4 融合量化，以及 FP16 WMMA Tensor Core 对照路径。本目录随附量化、文件读写和独立参考模块，可单独构建、测试和提交。
+当前优化结果见 [RTX 4090 D 实验报告](REPORT_4090D.md)：包含同一 GPU 上的首版/优化版比较、128 MiB 输入实验、Nsight Systems 时间线和已通过的 Compute Sanitizer 检查。原 RTX 3060 Laptop 数据保留在 [首版报告](REPORT.md)。
+
+题目 3，提交 ID：`zmuxuny`。实现 FP16/BF16 快速 Walsh-Hadamard 变换、MXFP8/NVFP4 融合量化，以及 FP16/BF16 Tensor Core 分解与融合路径（另保留 FP16 稠密 WMMA 对照）。本目录随附量化、文件读写和独立参考模块，可单独构建、测试和提交。
 
 ## 使用
 
@@ -34,11 +36,23 @@ NVFP4 的全局 scale 依赖整个变换后的张量，不能仅凭单个 warp �
 
 主程序同时运行非融合和融合路径，比较 scales、global scale、packed data；任何不一致都以非零状态退出。融合文件可由 `tests/reference.py` 的 `read_packed` / `dequantize` 读取，协议也与题目 2 兼容。
 
-## Tensor Core 对照
+## Tensor Core 分解与融合
 
-FP16 且 `head_dim >=16` 时默认运行 WMMA `16x16x16`，输入为 FP16、累加为 FP32，并输出 `tensor_core_ms` 和误差。`--tc_output path` 可保存结果，`--tensor_core 0` 可关闭。它实现稠密 `X*H`，复杂度为 `O(D²)`；蝶形为 `O(D log D)`，性能比较明确区分算法。
+在支持的 GPU 上以 `make clean && make ARCH=89`（4090 D）或 `ARCH=86`（3060）构建即可开启，要求目标架构 `sm_80` 或更新。默认 `ARCH=75` 保留兼容实现。
 
-BF16 使用可移植蝶形路径。Tensor Core 对照当前只实现 FP16，不把 BF16 转成 FP16 来冒充全范围 BF16 支持。主程序输出仍为蝶形结果，量化融合也在蝶形路径上完成。
+新路径将 `H_D` 分解为 `H_(D/16) ⊗ H_16`，使用两条 `mma.sync.m16n8k16` 处理 H16，其余级用 FP32 寄存器蝶形合并。FP16/BF16 均使用对应原生 MMA，累加为 FP32，复杂度 O(D log D)。进一步在寄存器内完成 MXFP8/NVFP4 量化；NVFP4 仍包含全局 amax 预遍历。
+
+主程序默认同时测量蝶形、分解 Tensor Core，以及 FP16 稠密 WMMA 对照。`--tensor_core 0` 可关闭 Tensor Core 测量。默认 `--output` 与 `--packed` 保存蝶形结果；指定下列参数可保存新 Tensor Core 路径的结果：
+
+```bash
+./build/hadamard --input results/tmp/input.bin \
+  --output results/tmp/butterfly.bin --packed results/tmp/butterfly.pack \
+  --factorized_tc_output results/tmp/mma.bin \
+  --factorized_tc_packed results/tmp/mma.pack \
+  --log results/tmp/metrics.json --format nvfp4 --repeats 100
+```
+
+日志包含 `factorized_tc_ms`、`factorized_tc_unfused_ms`、`factorized_tc_fused_ms`、误差和加速比。每个后端独立比较其融合与非融合 packed 结果；Tensor Core 与蝶形因浮点求和顺序不同，分别与同一个 float64 参考比较。原稠密 WMMA 实现为 O(D²)，仅 FP16，仍以 `tensor_core_ms` 记录，`--tc_output` 保存其输出。两种 Tensor Core 算法在报告中明确区分。
 
 ## 测试与实验
 
@@ -50,6 +64,6 @@ BF16 使用可移植蝶形路径。Tensor Core 对照当前只实现 FP16，不�
 
 使用 CUDA event，预热 3 次；重复次数由 `--repeats` 指定。有效带宽按逻辑输入输出字节数计算。`unfused_ms` 包含变换和完整量化，`fused_ms` 包含融合所需的所有 GPU 步骤。小尺寸主要受启动开销影响，数据传输计时单独报告。实测分析见 [REPORT.md](REPORT.md)。
 
-运行 `python3 tests/report.py` 可重建本题报告和图；`tests/profile.py` 可独立运行 profiler/sanitizer 检查。`include/` 和 `tests/reference.py` 是本作者题目 2 数值模块的本地副本，初始数值版本为 b7480df；未改动运算规则，保留副本是为使两份 PR 不依赖彼此的合并顺序。
+运行 `python3 tests/report.py` 可重建本题报告和图；`tests/profile.py` 可独立运行 profiler/sanitizer 检查。`include/` 和 `tests/reference.py` 是本作者题目 2 数值模块的本地副本，初始数值版本为 b7480df，后续软件编码与索引优化同步维护；保留副本是为使两份 PR 不依赖彼此的合并顺序。
 
-本机 WSL 工具限制的处理步骤见 [PROFILING.md](PROFILING.md)。
+原生 Linux 分析结果及本机 WSL 设置说明见 [PROFILING.md](PROFILING.md)。

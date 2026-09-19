@@ -1,5 +1,6 @@
 #include "../include/host.hpp"
 #include "hadamard.cuh"
+#include "tensor_core.cuh"
 
 using namespace lp;
 
@@ -142,6 +143,58 @@ int main(int argc, char **argv) try {
     if (!get(o, "tc_output").empty())
       write_tensor(get(o, "tc_output"), t);
   }
+#if LP_CUDA_ARCH >= 80
+  if (d >= 16 && get(o, "tensor_core", "1") == "1") {
+    Device ty(x.data.size());
+    double tc = elapsed(
+        [&] {
+          launch_had_mma(in.ptr, ty.ptr, x.rows, d, x.dtype, norm, signs, sign_seed);
+        },
+        repeats);
+    Tensor t{x.rows, x.cols, x.dtype, std::vector<uint8_t>(x.data.size())};
+    ty.download(t.data.data(), t.data.size());
+    double e = errors(ref, t)["max_abs_error"];
+    if (e >= tolerance)
+      throw std::runtime_error("factorized MMA exceeds absolute error tolerance");
+    double tc_separate = elapsed(
+        [&] {
+          launch_had_mma(in.ptr, ty.ptr, x.rows, d, x.dtype, norm, signs, sign_seed);
+          quantize(ty.ptr, data.as<uint8_t>(), scales.as<uint8_t>(), amax.as<float>(),
+                   p);
+        },
+        repeats);
+    double tc_fused = elapsed(
+        [&] {
+          fused_had_mma(in.ptr, x.rows, d, x.dtype, norm, signs, sign_seed,
+                        fdata.as<uint8_t>(), fscales.as<uint8_t>(), fmax.as<float>(),
+                        p);
+        },
+        repeats);
+    Packed tq = q, tfq = fq;
+    amax.download(&ma, 4);
+    fmax.download(&mf, 4);
+    tq.global = p.fmt == NVFP4 ? global_scale(ma) : 1;
+    tfq.global = p.fmt == NVFP4 ? global_scale(mf) : 1;
+    data.download(tq.data.data(), tq.data.size());
+    scales.download(tq.scales.data(), tq.scales.size());
+    fdata.download(tfq.data.data(), tfq.data.size());
+    fscales.download(tfq.scales.data(), tfq.scales.size());
+    if (tq.global != tfq.global || tq.data != tfq.data || tq.scales != tfq.scales)
+      throw std::runtime_error("factorized MMA fused/unfused packed mismatch");
+    if (!get(o, "factorized_tc_packed").empty())
+      write_packed(get(o, "factorized_tc_packed"), tfq);
+    metrics["factorized_tc_unfused_ms"] = tc_separate;
+    metrics["factorized_tc_fused_ms"] = tc_fused;
+    metrics["factorized_tc_fusion_speedup"] = tc_separate / tc_fused;
+    metrics["factorized_tc_fused_vs_butterfly_speedup"] = fused / tc_fused;
+    metrics["factorized_tc_packed_equal"] = 1;
+    metrics["factorized_tc_ms"] = tc;
+    metrics["factorized_tc_max_abs_error"] = e;
+    metrics["factorized_tc_vs_butterfly_speedup"] = hms / tc;
+    if (!get(o, "factorized_tc_output").empty())
+      write_tensor(get(o, "factorized_tc_output"), t);
+  }
+#endif
   write_tensor(required(o, "output"), y);
   write_packed(required(o, "packed"), fq);
   if (!get(o, "unfused_packed").empty())

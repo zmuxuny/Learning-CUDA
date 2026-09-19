@@ -19,20 +19,28 @@ from reference import (
 
 def main():
     cases = list(
-        itertools.product([1, 2], [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024], [0, 1])
+        itertools.product(
+            [1, 2], [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024], [0, 1], [19]
+        )
     )
+    # Few-row/CTA-boundary cases exercise collective MMA and block reductions
+    # with inactive warps. Keep these extra cases normalized.
+    cases += list(itertools.product([1, 2], [64, 1024], [0, 1], [1, 2, 31, 32]))
     maxerr = {1: 0.0, 2: 0.0}
+    mma_maxerr = {1: 0.0, 2: 0.0}
+    mma_cases = 0
     with tempfile.TemporaryDirectory(prefix="had-test-") as tmp:
         t = Path(tmp)
-        for i, (dtype, d, fmt) in enumerate(cases):
+        for i, (dtype, d, fmt, rows) in enumerate(cases):
             rng = np.random.default_rng(i)
-            x = rng.normal(size=(19, d)).astype(np.float32)
-            x[0] = 0
-            x[1] = 0
-            x[1, 0] = 8
+            x = rng.normal(size=(rows, d)).astype(np.float32)
+            if rows > 1:
+                x[0] = 0
+                x[1] = 0
+                x[1, 0] = 8
             signs = i % 2 == 0
             stochastic = i % 3 == 0
-            norm = i % 4 != 0
+            norm = i >= 44 or i % 4 != 0
             write_tensor(t / "input", x, dtype)
             x, _ = read_tensor(t / "input")
             command = [
@@ -59,7 +67,12 @@ def main():
                 "3",
                 "--tc_output",
                 str(t / "tc"),
+                "--factorized_tc_output",
+                str(t / "mma"),
+                "--factorized_tc_packed",
+                str(t / "mma_packed"),
             ]
+            (t / "mma").unlink(missing_ok=True)
             p = subprocess.run(command, capture_output=True, text=True)
             assert p.returncode == 0, (dtype, d, fmt, p.stdout, p.stderr)
             y, _ = read_tensor(t / "output")
@@ -73,6 +86,17 @@ def main():
             if dtype == 1 and d >= 16:
                 tc, _ = read_tensor(t / "tc")
                 assert np.max(np.abs(tc - ref)) < 1e-2
+            metrics = json.loads((t / "log").read_text())
+            if "factorized_tc_ms" in metrics:
+                mma, _ = read_tensor(t / "mma")
+                error = float(np.max(np.abs(mma - ref)))
+                assert error < (1e-2 if dtype == 1 else 5e-2), (dtype, d, error)
+                mma_maxerr[dtype] = max(mma_maxerr[dtype], error)
+                mma_expected = quantize(
+                    mma, fmt, 32 if fmt == 0 else 16, stochastic=stochastic
+                )
+                assert_packed(read_packed(t / "mma_packed"), mma_expected)
+                mma_cases += 1
         write_tensor(t / "input", np.ones((2, 63)), 1)
         p = subprocess.run(command, capture_output=True, text=True)
         assert p.returncode != 0 and "power of two" in p.stderr
@@ -83,6 +107,9 @@ def main():
         "max_abs_error_fp16": maxerr[1],
         "max_abs_error_bf16": maxerr[2],
         "fused_packed_equal": True,
+        "factorized_tc_cases": mma_cases,
+        "factorized_tc_max_abs_error_fp16": mma_maxerr[1],
+        "factorized_tc_max_abs_error_bf16": mma_maxerr[2],
         "oracle": "NumPy float64 dense Sylvester matrix",
     }
     (ROOT / "results/correctness.json").write_text(json.dumps(result, indent=2) + "\n")

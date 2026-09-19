@@ -1,4 +1,43 @@
-# 本机 Profiler / Sanitizer 处理步骤
+# RTX 4090 D：已完成的工具检查
+
+2026-09-19 在原生 Linux 容器、CUDA 12.8、驱动 570.124.06 上完成。Profiler 为题目加分项；Compute Sanitizer 未被题目列为硬性提交条件，本版已补齐真实检查。
+
+## Compute Sanitizer
+
+`python3 tests/profile_native.py` 依次运行 memcheck、racecheck 和 synccheck，并设置 `--error-exitcode 99`。题目 3 覆盖 19×128 FP16、35×1024 FP16/BF16，两种格式，共 18 次检查；同一次程序执行包括蝶形、稠密 WMMA（FP16）、分解 MMA 及融合路径。检查全部通过，原始命令、工具摘要和退出码位于 `results/4090d/after/`，汇总见 [profiling.json](results/4090d/after/profiling.json)。数值正确性另由独立 NumPy oracle 检查。
+
+## Nsight Systems
+
+成功使用 `nsys profile --sample=none --cpuctxsw=none --trace=cuda,nvtx` 采集两种格式的 CUDA 时间线；关闭 CPU 采样是因为容器不开放 Linux perf_event，CUDA tracing 正常。
+
+- [MXFP8 时间线](results/4090d/after/timeline_mxfp8.nsys-rep)、[kernel/API 汇总](results/4090d/after/nsys_stats_mxfp8.csv)。
+- [NVFP4 时间线](results/4090d/after/timeline_nvfp4.nsys-rep)、[kernel/API 汇总](results/4090d/after/nsys_stats_nvfp4.csv)。
+
+程序包含多个实现、验证和传输实验，因此汇总百分比属于整个验证程序，各实现的调用次数也不同；比较路径使用无插桩 benchmark 的 CUDA event 时间。初始化分配、CPU 参考和文件 I/O 不计入 kernel benchmark。
+
+采样输入为 8192×128 FP16，开启随机符号。以下为 Nsight Systems kernel 平均耗时（带插桩）：
+
+| 阶段 | 蝶形 μs | 分解 Tensor Core μs |
+| --- | --- | --- |
+| 单独变换，MXFP8 实验 | 3.281 | 2.989 |
+| MXFP8 融合输出 | 5.838 | 4.502 |
+| NVFP4 变换后 amax 预遍历 | 4.064 | 2.641 |
+| NVFP4 融合输出 | 8.100 | 5.174 |
+
+每个融合/预遍历 kernel 调用 23 次（3 次预热 + 20 次重复）。原稠密 WMMA 平均约 13.3–13.5 μs；分解实现将完整 D×D 矩阵乘法替换为 H16 小块乘法与寄存器蝶形，时间线显示单独变换和融合输出均有收益。MXFP8 融合省去中间张量及后续独立量化 kernel；NVFP4 仍保留两阶段，Tensor Core 同时加速预遍历和最终输出。其总流程还包含清零和启动间隔，不能仅将两个 kernel 的平均值当作总延迟。
+
+[反汇编证据](results/4090d/after/tensor_core_instructions.txt) 按函数保留 `HMMA` 指令，可确认 FP16/BF16 的分解变换及融合函数实际使用 Tensor Core。[静态资源报告](results/4090d/after/resources.txt) 显示分解 MMA 各实例无 local-memory 分配和栈帧；D=128 的融合使用32–37 个寄存器，D=1024 使用 56–64 个寄存器。融合输出不使用共享内存；全局 amax 预遍历使用每 CTA 16 字节共享内存汇总 4 个 warp 的最大值。这些是编译器资源信息，不等同于实测 occupancy。
+
+
+## Nsight Compute 权限
+
+NCU 2025.1.0 已能识别设备，但返回 `ERR_NVGPUCTRPERM`。宿主机 `RmProfilingAdminOnly=1`，容器缺少 CAP_SYS_ADMIN，容器内 root 不能自行开放计数器。这次保留 [原始错误](results/4090d/after/ncu.txt)，没有硬件 DRAM 利用率、实际 occupancy 或 stall 指标。Nsight Systems 时间线、CUDA event 对比和反汇编证据均已完成。
+
+若后续算力提供方开放性能计数器，可继续用 `ncu --set full --launch-count 10 ...` 补充硬件分析，不必重写实现。
+
+---
+
+# 本机 WSL 工具设置（首版环境）
 
 ## 是否为验收必需
 

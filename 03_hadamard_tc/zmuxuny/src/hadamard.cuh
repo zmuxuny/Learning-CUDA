@@ -5,20 +5,20 @@
 namespace lp {
 // One warp transforms one row. XOR butterflies stay in registers: the first
 // five stages exchange lanes; remaining stages exchange each lane's registers.
-template <int D, int MODE>
+template <int D, int MODE, int FMT>
 __global__ void hadamard_kernel(const void *x, void *y, size_t rows, int dtype,
                                 bool normalize, bool random_sign, uint32_t sign_seed,
                                 uint8_t *data, uint8_t *scales, float *amax, Layout p) {
   constexpr int V = (D + 31) / 32;
   int lane = threadIdx.x & 31;
   size_t row = size_t(blockIdx.x) * 4 + threadIdx.x / 32;
-  if (row >= rows)
+  if (row >= rows && MODE != 1)
     return;
   float v[V];
 #pragma unroll
   for (int j = 0; j < V; ++j) {
     int c = j * 32 + lane;
-    v[j] = c < D ? load(x, row * D + c, dtype) : 0;
+    v[j] = c < D && row < rows ? load(x, row * D + c, dtype) : 0;
     if (random_sign && uniform(c, sign_seed) < 0.5f)
       v[j] = -v[j];
   }
@@ -55,28 +55,42 @@ __global__ void hadamard_kernel(const void *x, void *y, size_t rows, int dtype,
       if (j * 32 + lane < D)
         m = fmaxf(m, fabsf(v[j]));
     m = warp_max(m);
+    __shared__ float maxima[4];
     if (lane == 0)
-      atomicMax(reinterpret_cast<unsigned *>(amax), __float_as_uint(m));
+      maxima[threadIdx.x / 32] = m;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+      m = warp_max(lane < 4 ? maxima[lane] : 0.0f);
+      if (lane == 0)
+        atomicMax(reinterpret_cast<unsigned *>(amax), __float_as_uint(m));
+    }
   } else {
     // Fused path uses canonical 32-value MXFP8 / 16-value NVFP4 blocks.
     // Rounding to the transform output dtype before quantizing makes the
     // packed result exactly equal to the unfused, materialized pipeline.
-    int b = p.fmt == MXFP8 ? 32 : 16;
-    float global = p.fmt == NVFP4 ? global_scale(*amax) : 1;
+    constexpr int b = FMT == MXFP8 ? 32 : 16;
+    float global = FMT == NVFP4 ? global_scale(*amax) : 1;
 #pragma unroll
     for (int j = 0; j < V; ++j) {
       int c = j * 32 + lane;
       float m = warp_max(c < D ? fabsf(v[j]) : 0, b);
-      uint8_t s = p.fmt == MXFP8 ? mx_scale(m) : encode8((m / global) / 6.0f);
-      float scale = scale_value(s, p.fmt);
-      float z = p.fmt == NVFP4 ? v[j] / global : v[j];
-      z = scale == 0 ? 0 : z / scale;
+      unsigned shared_scale = 0;
+      if (lane % b == 0)
+        shared_scale = FMT == MXFP8 ? mx_scale(m) : encode8((m / global) / 6.0f);
+      uint8_t s = uint8_t(__shfl_sync(0xffffffff, shared_scale, 0, b));
+      float scale = scale_value(s, FMT);
+      float z = FMT == NVFP4 ? v[j] / global : v[j];
+      float unscaled = z;
+      z = FMT == MXFP8 ? mx_scaled(z, s) : (scale == 0 ? 0 : z / scale);
       size_t i = row * D + c;
-      uint8_t code = p.fmt == MXFP8 ? encode8(z, p.stochastic, uniform(i, p.seed))
-                                    : encode4(z, p.stochastic, uniform(i, p.seed));
+      uint8_t code =
+          FMT == MXFP8
+              ? encode8(z, p.stochastic, (p.stochastic ? uniform(i, p.seed) : 0.0f))
+              : encode4_scaled(unscaled, scale, p.stochastic,
+                               (p.stochastic ? uniform(i, p.seed) : 0.0f));
       if (c < D && lane % b == 0)
         scales[row * ((D + b - 1) / b) + c / b] = s;
-      if (p.fmt == MXFP8) {
+      if (FMT == MXFP8) {
         if (c < D)
           data[i] = code;
       } else {
@@ -87,14 +101,14 @@ __global__ void hadamard_kernel(const void *x, void *y, size_t rows, int dtype,
     }
   }
 }
-template <int MODE>
-inline void launch_had(const void *x, void *y, size_t rows, int d, int dtype, bool norm,
-                       bool signs, uint32_t seed, uint8_t *data, uint8_t *scales,
-                       float *amax, Layout p) {
+template <int MODE, int FMT>
+inline void launch_had_format(const void *x, void *y, size_t rows, int d, int dtype,
+                              bool norm, bool signs, uint32_t seed, uint8_t *data,
+                              uint8_t *scales, float *amax, Layout p) {
 #define HAD_CASE(D)                                                                    \
   case D:                                                                              \
-    hadamard_kernel<D, MODE><<<(rows + 3) / 4, 128>>>(x, y, rows, dtype, norm, signs,  \
-                                                      seed, data, scales, amax, p);    \
+    hadamard_kernel<D, MODE, FMT><<<(rows + 3) / 4, 128>>>(                            \
+        x, y, rows, dtype, norm, signs, seed, data, scales, amax, p);                  \
     break
   switch (d) {
     HAD_CASE(1);
@@ -110,6 +124,20 @@ inline void launch_had(const void *x, void *y, size_t rows, int d, int dtype, bo
     HAD_CASE(1024);
   }
 #undef HAD_CASE
+}
+template <int MODE>
+inline void launch_had(const void *x, void *y, size_t rows, int d, int dtype, bool norm,
+                       bool signs, uint32_t seed, uint8_t *data, uint8_t *scales,
+                       float *amax, Layout p) {
+  if constexpr (MODE == 2) {
+    if (p.fmt == NVFP4) {
+      launch_had_format<MODE, NVFP4>(x, y, rows, d, dtype, norm, signs, seed, data,
+                                     scales, amax, p);
+      return;
+    }
+  }
+  launch_had_format<MODE, MXFP8>(x, y, rows, d, dtype, norm, signs, seed, data, scales,
+                                 amax, p);
 }
 inline void fused_had(const void *x, size_t rows, int d, int dtype, bool norm,
                       bool signs, uint32_t seed, uint8_t *data, uint8_t *scales,

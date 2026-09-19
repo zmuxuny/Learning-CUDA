@@ -236,6 +236,12 @@ NVFP4 融合结果（已包含全局缩放所需预处理）：
 
 本目录运行 `make && python3 tests/validate.py && python3 tests/benchmark.py`。运行 `python3 tests/report.py` 重建本题报告。量化编码、文件模块与参考实现均在本题目录内，不依赖另一个 PR。详细 CLI 与输入文件协议见 [README](README.md)。
 """
+    title, rest = hdoc.split("\n", 1)
+    hdoc = (
+        title
+        + "\n\n> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前优化实现、4090 D 同机前后对比和工具检查见 [RTX 4090 D 优化报告](REPORT_4090D.md)。\n"
+        + rest
+    )
     (H / "REPORT.md").write_text(hdoc)
 
 
