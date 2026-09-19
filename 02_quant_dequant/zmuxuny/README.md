@@ -1,8 +1,8 @@
 # MXFP8 / NVFP4 软件量化与反量化
 
-当前优化结果见 [RTX 4090 D 实验报告](REPORT_4090D.md)：包含同一 GPU 上的首版/优化版比较、128 MiB 输入实验、Nsight Systems 时间线和已通过的 Compute Sanitizer 检查。原 RTX 3060 Laptop 数据保留在 [首版报告](REPORT.md)。
+最新结果见 [RTX 4090 D 第二轮优化报告](REPORT_TUNING.md)：包含向量化量化/反量化、BF16 转换、软件舍入优化，以及独立的原生 FP8 对照。第一轮数据保留在 [4090 D 首轮报告](REPORT_4090D.md)，原 3060 数据保留在 [首版报告](REPORT.md)。
 
-题目 2，提交 ID：`zmuxuny`。纯 CUDA 软件实现，默认编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
+题目 2，提交 ID：`zmuxuny`。默认程序为纯 CUDA 软件实现，编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
 
 ## 构建与运行
 
@@ -108,3 +108,16 @@ python3 tests/report_4090.py
 ```
 
 大张量前后交替比较可用 `tests/benchmark_extended.py --before /path/to/old/quantize --after build/quantize`。`tests/report.py` 对应首版数据；`tests/report_4090.py` 使用独立归档的 4090 D 结果。
+
+## 第二轮调优与可选硬件转换
+
+默认量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [第二轮报告](REPORT_TUNING.md)。
+
+额外的 Ada FP8 转换对照使用独立可执行文件，不改变默认程序；需要 CUDA >=12.1 和 `sm_89` 或更新：
+
+```bash
+make native ARCH=89 NVCC=/usr/local/cuda/bin/nvcc HOSTCXX=g++
+python3 tests/validate.py --binary build/quantize_native
+```
+
+原生对照只加速 E4M3 最近偶数转换；随机舍入和 NVFP4 的 E2M1 编码继续使用软件实现。日志 `fp8_encoding` 标识所用实现。两路的 packed 文件、scales 和舍入语义一致。

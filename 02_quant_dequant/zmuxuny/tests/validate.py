@@ -19,20 +19,25 @@ from reference import (
 from generate import generate
 
 ROOT = Path(__file__).resolve().parents[1]
+BINARY = ROOT / "build/quantize"
 
 
 def run(args, success=True):
-    p = subprocess.run(
-        [str(ROOT / "build/quantize"), *map(str, args)], capture_output=True, text=True
-    )
+    p = subprocess.run([str(BINARY), *map(str, args)], capture_output=True, text=True)
     assert (p.returncode == 0) == success, p.stdout + p.stderr
     return p
 
 
 def main():
+    global BINARY
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--binary", type=Path, default=BINARY)
+    parser.add_argument(
+        "--output", type=Path, default=ROOT / "results/correctness.json"
+    )
     args = parser.parse_args()
+    BINARY = args.binary.resolve()
     cases = []
     for fmt, dtype, out, tensor, stochastic in itertools.product(
         range(2), range(2), range(3), range(2), range(2)
@@ -218,7 +223,7 @@ def main():
         "oracle": "NumPy explicit FP8/FP4 codebook search",
         "status": "PASS",
     }
-    (ROOT / "results/correctness.json").write_text(json.dumps(summary, indent=2) + "\n")
+    args.output.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary))
 
 

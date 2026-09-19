@@ -25,6 +25,7 @@ def main():
     baseline = "0a5e40b" if HAD else "73b66de"
     lines = [
         "# RTX 4090 D 优化实验",
+        "\n本页为第一轮已归档结果。最新实现与第二轮对比见 [REPORT_TUNING.md](REPORT_TUNING.md)。",
         "",
         f"实测日期：2026-09-19。基线为本题首版提交 `{baseline}`（与实际构建的本地集成快照 `deba5cb` 对应目录完全相同），优化前后均在同一台 RTX 4090 D 24 GiB 上执行。CUDA 12.8、驱动 570.124.06、GCC 13，编译目标 `sm_89`，使用 `-O3 --fmad=false -lineinfo`。环境和基线可执行文件 SHA256 见 [environment.json](results/4090d/environment.json)。",
         "",
@@ -85,6 +86,7 @@ def main():
             "所有 24 组常规基准的 MAE、MSE 和最大绝对误差与基线一致。完整均匀分布、正态、异常值，以及 per-tensor/per-block 和 FP16/FP32 数据见 `before/benchmark.json`、`after/benchmark.json`。",
             "",
             "## 大张量：输入 128 MiB",
+            "\n本轮沿用格式预设：MXFP8 反量化输出 FP16，NVFP4 反量化输出 FP32；同一行的优化前后输出类型相同。第二轮改为统一 FP32 输出，反量化耗时不能跨报告直接比较。",
             "",
             "| 输入形状 / dtype | 格式 | 量化前/后 μs | 加速 | 反量化前/后 μs | 加速 |",
             "| --- | --- | --- | --- | --- | --- |",

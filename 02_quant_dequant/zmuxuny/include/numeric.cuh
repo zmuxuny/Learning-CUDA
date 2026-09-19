@@ -4,18 +4,35 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#ifndef LP_NATIVE_FP8
+#define LP_NATIVE_FP8 0
+#endif
+#if LP_NATIVE_FP8 && defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
+#error "The optional native FP8 comparison requires ARCH=89 or newer"
+#endif
+
 namespace lp {
+inline const char *fp8_encoding_backend() {
+  return LP_NATIVE_FP8 ? "native_rne_software_sr" : "software";
+}
 enum Dtype { FP32 = 0, FP16 = 1, BF16 = 2 };
 enum Format { MXFP8 = 0, NVFP4 = 1 };
 
-// BF16 conversion is implemented with integer operations, including on sm_75.
+// Use native round-to-nearest BF16 conversion on Ampere+, with the original
+// bit-exact integer implementation for the CPU and older architectures.
 __host__ __device__ inline uint16_t bf16(float x) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  uint16_t result;
+  asm("cvt.rn.bf16.f32 %0, %1;" : "=h"(result) : "f"(x));
+  return result;
+#else
   union {
     float f;
     uint32_t u;
   } v{x};
   v.u += 0x7fffU + ((v.u >> 16) & 1U);
   return static_cast<uint16_t>(v.u >> 16);
+#endif
 }
 __host__ __device__ inline float unbf16(uint16_t x) {
   union {
@@ -79,21 +96,53 @@ __host__ __device__ inline int round_code(float pos, bool stochastic, float u) {
 }
 __host__ __device__ inline uint8_t encode8(float x, bool stochastic = false,
                                            float u = 0) {
+#if LP_NATIVE_FP8 && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 890
+  if (!stochastic) {
+    uint16_t result;
+    // PTX packs source a into the upper byte and source b into the lower byte.
+    asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(result) : "f"(0.0f), "f"(x));
+    return uint8_t(result);
+  }
+#endif
   unsigned sign = signbit(x) ? 128 : 0;
   float a = fminf(fabsf(x), 448.0f);
-  if (a < 0.015625f)
+  if (a < 0.015625f) {
+#if defined(__CUDA_ARCH__)
+    if (!stochastic)
+      return uint8_t(sign | unsigned(__float2int_rn(a * 512.0f)));
+#endif
     return uint8_t(sign | round_code(a * 512.0f, stochastic, u));
+  }
   union {
     float f;
     uint32_t u;
   } bits{a};
+  if (!stochastic) {
+    // RNE at the retained mantissa LSB; carry naturally increments exponent.
+    // Clamping the magnitude to 448 above bounds the resulting code at 126.
+    uint32_t rounded = bits.u + 0x7ffffU + ((bits.u >> 20) & 1U);
+    return uint8_t(sign | ((rounded >> 20) - 960U));
+  }
   int exponent = int(bits.u >> 23) - 120;
   uint32_t mantissa = bits.u & 0x7fffffU;
   int lo = int(mantissa >> 20);
   uint32_t remainder = mantissa & 0xfffffU;
-  bool up = stochastic ? u < float(remainder) * 0x1p-20f
-                       : (remainder > 0x80000U || (remainder == 0x80000U && (lo & 1)));
+  bool up = u < float(remainder) * 0x1p-20f;
   return uint8_t(sign | min(126, exponent * 8 + lo + int(up)));
+}
+// Two adjacent values share one native conversion instruction. Software/SR
+// retain exactly the scalar encoder's element-index-dependent rounding.
+__host__ __device__ inline uint16_t encode8_pair(float lo, float hi, bool stochastic,
+                                                 float u0, float u1) {
+#if LP_NATIVE_FP8 && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 890
+  if (!stochastic) {
+    uint16_t result;
+    asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(result) : "f"(hi), "f"(lo));
+    return result;
+  }
+#endif
+  return uint16_t(encode8(lo, stochastic, u0)) |
+         (uint16_t(encode8(hi, stochastic, u1)) << 8);
 }
 __host__ __device__ inline uint8_t encode4(float x, bool stochastic = false,
                                            float u = 0) {

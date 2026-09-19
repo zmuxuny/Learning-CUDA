@@ -61,7 +61,9 @@ int main(int argc, char **argv) try {
     out.download(y.data.data(), y.data.size());
     write_tensor(required(o, "output"), y);
     log_json(required(o, "log"), {{"dequant_ms", ms}},
-             {{"gpu", gpu_name()}, {"mode", mode}});
+             {{"gpu", gpu_name()},
+              {"fp8_encoding", fp8_encoding_backend()},
+              {"mode", mode}});
     return 0;
   }
   if (mode != "quantize")
@@ -149,6 +151,7 @@ int main(int argc, char **argv) try {
   write_tensor(required(o, "output"), y);
   log_json(required(o, "log"), metrics,
            {{"gpu", gpu_name()},
+            {"fp8_encoding", fp8_encoding_backend()},
             {"format", get(cfg, "format", "mxfp8")},
             {"rounding", get(cfg, "rounding", "nearest")},
             {"scale_mode", get(cfg, "scale_mode", "block")},

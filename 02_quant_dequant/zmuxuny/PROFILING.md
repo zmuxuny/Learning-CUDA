@@ -1,3 +1,39 @@
+# 第二轮检查与采样入口
+
+第二轮使用当前软件版和独立的原生 FP8 对照，详见 [最新性能报告](REPORT_TUNING.md)。每路各执行 24 次 memcheck、racecheck、synccheck；题目 2 增加了整块对齐向量访问、FP32/FP16 输入和 BF16 输出，题目 3 同时覆盖 NVFP4 中间结果保留对照。
+
+- [软件版检查状态](results/4090d/tuning/software/profiling.json) 与 [原生对照状态](results/4090d/tuning/native/profiling.json)。
+- [软件版 MXFP8 汇总](results/4090d/tuning/software/nsys_stats_mxfp8.csv)、[NVFP4 汇总](results/4090d/tuning/software/nsys_stats_nvfp4.csv)。
+- [原生版 MXFP8 汇总](results/4090d/tuning/native/nsys_stats_mxfp8.csv)、[NVFP4 汇总](results/4090d/tuning/native/nsys_stats_nvfp4.csv)。
+- 两路目录各保存可由 Nsight Systems GUI 打开的 `timeline_*.nsys-rep`、静态资源报告 `resources.txt`、转换指令反汇编 `conversion_instructions.txt`；题目 3 另保留 `tensor_core_instructions.txt`。
+
+FP8 原生对照的反汇编包含 `F2FP.SATFINITE.E4M3.F32`，默认软件版不含该指令；BF16 原生转换为 `F2FP.BF16.F32`，对应代码保留旧架构的软件回退。Nsight Compute 的计数器权限仍由宿主机限制，原始错误保存在各目录 `ncu.txt`。
+
+```bash
+python3 tests/profile_native.py --output results/4090d/tuning/software
+python3 tests/profile_native.py --binary build/quantize_native --output results/4090d/tuning/native
+```
+
+## 第二轮时间线分析
+
+采样输入为 1024×1024 FP16；沿用配置文件，MXFP8 反量化输出 FP16，NVFP4 输出 FP32。下表为带插桩的 kernel 平均时间，单位 μs；完整性能比较使用报告中无插桩的 CUDA event 数据。
+
+| kernel | 软件版 | 原生 FP8 对照 |
+| --- | --- | --- |
+| MXFP8 量化 | 2.913 | 2.650 |
+| MXFP8 反量化至 FP16 | 2.194 | 2.191 |
+| NVFP4 全局 amax | 1.911 | 1.903 |
+| NVFP4 局部缩放与量化 | 3.886 | 3.782 |
+| NVFP4 反量化至 FP32 | 3.001 | 2.996 |
+
+MXFP8 时间线中量化只保留一次向量 kernel；NVFP4 仍需清零、向量 amax 和量化。原生 E4M3 转换主要减少 MXFP8 编码时间，NVFP4 的数据编码与全局归约没有因此消失，收益较小。反量化两路采用同一实现，时间接近。每个主要 kernel 记录 46 次调用，来自单项测试和包含传输测试的各 3 次预热 + 20 次重复；不能把整个验证程序的总占比解释为一次量化的占比，也不能把上表 kernel 时间之和当作完整流程延迟。
+
+软件量化实例使用 24 个（MXFP8）或 32 个（NVFP4）寄存器，向量反量化使用 16–22 个；两者无共享内存、无 local-memory 分配和栈帧。向量 amax 使用每 CTA 128 字节共享内存、22–25 个寄存器。静态资源说明这次向量化没有出现寄存器溢出对应的 local-memory 分配，实际 occupancy 仍需硬件计数器测量。
+
+以下为第一轮已归档检查与分析。
+
+---
+
 # RTX 4090 D：已完成的工具检查
 
 2026-09-19 在原生 Linux 容器、CUDA 12.8、驱动 570.124.06 上完成。Profiler 为题目加分项；Compute Sanitizer 未被题目列为硬性提交条件，本版已补齐真实检查。
