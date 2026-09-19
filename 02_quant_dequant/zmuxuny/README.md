@@ -1,5 +1,7 @@
 # MXFP8 / NVFP4 软件量化与反量化
 
+当前优化结果见 [RTX 4090 D 实验报告](REPORT_4090D.md)：包含同一 GPU 上的首版/优化版比较、128 MiB 输入实验、Nsight Systems 时间线和已通过的 Compute Sanitizer 检查。原 RTX 3060 Laptop 数据保留在 [首版报告](REPORT.md)。
+
 题目 2，提交 ID：`zmuxuny`。纯 CUDA 软件实现，默认编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
 
 ## 构建与运行
@@ -92,4 +94,17 @@ BF16 以 16 位原始位模式存储，使用整数实现 RNE 转换，在 `sm_7
 
 工具检查脚本为 `tests/profile.py`，可用 `--ncu`、`--sanitizer` 指定可用工具路径；仅检查本题。本机 WSL 的 profiler / 调试接口限制及失败日志单独记录，不计作检查通过。报告和图表通过 `python3 tests/report.py` 从本题 JSON 重建，额外依赖 Matplotlib。
 
-本机 WSL 工具限制的处理步骤见 [PROFILING.md](PROFILING.md)。
+原生 Linux 分析结果及本机 WSL 设置说明见 [PROFILING.md](PROFILING.md)。
+
+## 优化实现与原生 Linux 分析
+
+默认块长度的 scale 计算和量化写出已融合，整块对齐张量使用连续 tile，奇数列和行尾保持独立打包。E4M3 编码/解码使用整数位域，E8M0 使用精确二次幂缩放；NVFP4 最近偶数舍入使用缩放后的精确阈值，随机舍入保留原有商与概率计算。
+
+```bash
+make clean && make ARCH=89 NVCC=/usr/local/cuda/bin/nvcc HOSTCXX=g++
+python3 tests/validate.py
+python3 tests/profile_native.py
+python3 tests/report_4090.py
+```
+
+大张量前后交替比较可用 `tests/benchmark_extended.py --before /path/to/old/quantize --after build/quantize`。`tests/report.py` 对应首版数据；`tests/report_4090.py` 使用独立归档的 4090 D 结果。

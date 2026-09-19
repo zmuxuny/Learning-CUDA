@@ -78,6 +78,34 @@ def main():
                 ).reshape(1, -1),
             ]:
                 cases.append((x, fmt, 0, 0, False, False, 32 if fmt == 0 else 16))
+        # Tall tensors exercise grid.x row indexing beyond grid.y's 65535 limit;
+        # isolated tiny/large blocks exercise E8M0 reciprocal edge cases.
+        for fmt in range(2):
+            for x in [
+                generate(65537, 1, "normal"),
+                np.full((2, 32), np.float32(1e-40)),
+                np.full((2, 32), np.float32(1e38)),
+            ]:
+                cases.append((x, fmt, 0, 0, False, False, 32 if fmt == 0 else 16))
+        # Hold global scale at 1 and local scale at each finite positive E4M3
+        # value. Cover both signs of every FP4 midpoint and its +/-1 ULP values.
+        boundaries = (FP4[1:] + FP4[:-1]) / 2
+        scaled_cases = []
+        for scale in FP8[1:]:
+            midpoints = (boundaries * scale).astype(np.float32)
+            points = np.concatenate(
+                [
+                    np.nextafter(midpoints, np.float32(-np.inf)),
+                    midpoints,
+                    np.nextafter(midpoints, np.float32(np.inf)),
+                ]
+            )
+            points = np.concatenate([points, -points, np.zeros(3, np.float32)])
+            blocks = np.empty((3, 16), np.float32)
+            blocks[:, :15] = points.reshape(3, 15)
+            blocks[:, 15] = scale * 6
+            scaled_cases.append(blocks.reshape(-1))
+        cases.append((np.stack(scaled_cases), 1, 0, 0, False, False, 16))
         # Tensor amax=448 fixes the MXFP8 scale at 1: exercise every raw code
         # and every RNE midpoint, without automatic block rescaling hiding it.
         mid = (FP8[1:] + FP8[:-1]) / 2

@@ -233,6 +233,12 @@ GPU 含传输时间覆盖 H2D 输入、量化和反量化、D2H 重建输出。p
 
 `make && python3 tests/validate.py && python3 tests/benchmark.py` 可重建测试和计时数据；`python3 tests/report.py` 从本题的 JSON 重建报告与图。代码位于上游 `2026-summer-project` 基础上的 `02_quant_dequant/zmuxuny/`，可独立提交。
 """
+    title, rest = qdoc.split("\n", 1)
+    qdoc = (
+        title
+        + "\n\n> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前优化实现、4090 D 同机前后对比和工具检查见 [RTX 4090 D 优化报告](REPORT_4090D.md)。\n"
+        + rest
+    )
     (Q / "REPORT.md").write_text(qdoc)
 
 

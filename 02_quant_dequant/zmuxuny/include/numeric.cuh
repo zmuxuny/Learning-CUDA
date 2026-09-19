@@ -46,13 +46,20 @@ __host__ __device__ inline float cast(float x, int dtype) {
 }
 __host__ __device__ inline float fp8_value(unsigned c) {
   unsigned a = c & 127, e = a >> 3, m = a & 7;
-  float v = e == 0 ? ldexpf(float(m), -9) : ldexpf(1.0f + float(m) / 8.0f, int(e) - 7);
+  union {
+    uint32_t u;
+    float f;
+  } bits{((e + 120) << 23) | (m << 20)};
+  float v = e == 0 ? float(m) * 0x1p-9f : bits.f;
   return (c & 128) ? -v : v;
 }
 __host__ __device__ inline float fp4_value(unsigned c) {
   unsigned a = c & 7;
-  float v =
-      a < 2 ? float(a) * 0.5f : ldexpf(1.0f + float(a & 1) * 0.5f, int(a >> 1) - 1);
+  union {
+    uint32_t u;
+    float f;
+  } bits{((126 + (a >> 1)) << 23) | ((a & 1) << 22)};
+  float v = a < 2 ? float(a) * 0.5f : bits.f;
   return (c & 8) ? -v : v;
 }
 // Counter-based rounding: independent of launch geometry and repeatable by seed.
@@ -76,38 +83,83 @@ __host__ __device__ inline uint8_t encode8(float x, bool stochastic = false,
   float a = fminf(fabsf(x), 448.0f);
   if (a < 0.015625f)
     return uint8_t(sign | round_code(a * 512.0f, stochastic, u));
-  int e;
-  frexpf(a, &e);
-  // Within an exponent bin codes are consecutive, including its upper boundary.
-  // Round the mantissa before adding the exponent bits. Adding the integer
-  // code offset in float first can erase an ULP just above a midpoint.
-  int code = (e + 5) * 8 + round_code(ldexpf(a, 4 - e), stochastic, u);
-  return uint8_t(sign | min(126, code));
+  union {
+    float f;
+    uint32_t u;
+  } bits{a};
+  int exponent = int(bits.u >> 23) - 120;
+  uint32_t mantissa = bits.u & 0x7fffffU;
+  int lo = int(mantissa >> 20);
+  uint32_t remainder = mantissa & 0xfffffU;
+  bool up = stochastic ? u < float(remainder) * 0x1p-20f
+                       : (remainder > 0x80000U || (remainder == 0x80000U && (lo & 1)));
+  return uint8_t(sign | min(126, exponent * 8 + lo + int(up)));
 }
 __host__ __device__ inline uint8_t encode4(float x, bool stochastic = false,
                                            float u = 0) {
   float a = fminf(fabsf(x), 6.0f);
   int lo = a < 2 ? int(a * 2) : (a < 4 ? int(a) + 2 : int(a * 0.5f) + 4);
   lo = min(lo, 7);
-  float l = fp4_value(lo), h = fp4_value(min(lo + 1, 7));
+  float l = fp4_value(lo);
   int c = lo;
   if (lo < 7) {
-    float p = (a - l) / (h - l);
+    float p = (a - l) * (a < 2 ? 2.0f : (a < 4 ? 1.0f : 0.5f));
     c += stochastic ? u < p : (p > 0.5f || (p == 0.5f && (lo & 1)));
   }
+  return uint8_t(c | (signbit(x) ? 8 : 0));
+}
+// E4M3 scales times the E2M1 decision midpoints are exactly representable
+// in FP32. Comparing in the scaled domain removes one division for RNE.
+// Stochastic rounding still uses the rounded quotient and its original RNG.
+__host__ __device__ inline uint8_t encode4_scaled(float x, float scale, bool stochastic,
+                                                  float u) {
+  if (scale == 0)
+    return 0;
+  if (stochastic)
+    return encode4(x / scale, true, u);
+  float a = fabsf(x);
+  unsigned c = (a > scale * 0.25f) + (a >= scale * 0.75f) + (a > scale * 1.25f) +
+               (a >= scale * 1.75f) + (a > scale * 2.5f) + (a >= scale * 3.5f) +
+               (a > scale * 5.0f);
   return uint8_t(c | (signbit(x) ? 8 : 0));
 }
 // Round the required scale upward to a power of two: no finite-input clipping.
 __host__ __device__ inline uint8_t mx_scale(float amax) {
   if (amax == 0)
     return 127;
+  union {
+    float f;
+    uint32_t u;
+  } bits{amax};
+  int exponent = int(bits.u >> 23);
+  if (exponent != 0)
+    return uint8_t(
+        max(0, min(254, exponent - 8 + int((bits.u & 0x7fffffU) > 0x600000U))));
+  // Subnormal FP32 values need the full normalization path.
   int e;
   float m = frexpf(amax, &e);
   e -= m <= 0.875f ? 9 : 8;
   return uint8_t(max(0, min(254, e + 127)));
 }
 __host__ __device__ inline float scale_value(uint8_t s, int fmt) {
-  return fmt == MXFP8 ? ldexpf(1.0f, int(s) - 127) : fp8_value(s);
+  if (fmt != MXFP8)
+    return fp8_value(s);
+  union {
+    uint32_t u;
+    float f;
+  } bits{s == 0 ? 0x00400000U : uint32_t(s) << 23};
+  return bits.f;
+}
+// Dividing by an E8M0 scale equals multiplying by its exact power-of-two
+// reciprocal. Scale code zero has no finite FP32 reciprocal and uses division.
+__host__ __device__ inline float mx_scaled(float x, uint8_t s) {
+  if (s == 0)
+    return x / 0x1p-127f;
+  union {
+    uint32_t u;
+    float f;
+  } reciprocal{s == 254 ? 0x00400000U : uint32_t(254 - s) << 23};
+  return x * reciprocal.f;
 }
 __host__ __device__ inline float global_scale(float amax) {
   // Preserve a nonzero scale for subnormal FP32 inputs as well.

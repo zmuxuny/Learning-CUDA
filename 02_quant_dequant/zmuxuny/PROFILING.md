@@ -1,4 +1,44 @@
-# 本机 Profiler / Sanitizer 处理步骤
+# RTX 4090 D：已完成的工具检查
+
+2026-09-19 在原生 Linux 容器、CUDA 12.8、驱动 570.124.06 上完成。Profiler 为题目加分项；Compute Sanitizer 未被题目列为硬性提交条件，本版已补齐真实检查。
+
+## Compute Sanitizer
+
+`python3 tests/profile_native.py` 依次运行 memcheck、racecheck 和 synccheck，并设置 `--error-exitcode 99`。题目 2 覆盖 19×35 FP32、1031×1025 FP16，两种量化格式，共 12 次检查。检查全部通过，原始命令、工具摘要和退出码位于 `results/4090d/after/`，汇总见 [profiling.json](results/4090d/after/profiling.json)。数值正确性另由独立 NumPy oracle 检查。
+
+## Nsight Systems
+
+成功使用 `nsys profile --sample=none --cpuctxsw=none --trace=cuda,nvtx` 采集两种格式的 CUDA 时间线；关闭 CPU 采样是因为容器不开放 Linux perf_event，CUDA tracing 正常。
+
+- [MXFP8 时间线](results/4090d/after/timeline_mxfp8.nsys-rep)、[kernel/API 汇总](results/4090d/after/nsys_stats_mxfp8.csv)。
+- [NVFP4 时间线](results/4090d/after/timeline_nvfp4.nsys-rep)、[kernel/API 汇总](results/4090d/after/nsys_stats_nvfp4.csv)。
+
+程序包含多个实现、验证和传输实验，因此汇总百分比属于整个验证程序，各实现的调用次数也不同；比较路径使用无插桩 benchmark 的 CUDA event 时间。初始化分配、CPU 参考和文件 I/O 不计入 kernel benchmark。
+
+采样输入为 1024×1024 FP16，以下为 Nsight Systems kernel 平均耗时（带插桩）：
+
+| 格式 | kernel | 次数 | 平均 μs |
+| --- | --- | --- | --- |
+| MXFP8 | 融合块缩放与量化 | 46 | 6.415 |
+| MXFP8 | 反量化 | 46 | 4.219 |
+| NVFP4 | 全局 amax | 46 | 3.243 |
+| NVFP4 | 融合块缩放与量化 | 46 | 8.579 |
+| NVFP4 | 反量化 | 46 | 4.307 |
+
+MXFP8 时间线中每次量化只有 `quant_blocks_kernel`，首版独立 `scales_kernel` 已被消除；完整块连续映射也避免了短行中空闲线程的开销。NVFP4 仍需全局 amax 与清零，其独立归约平均约 3.24 μs；这解释了 NVFP4 小输入量化中的额外固定成本。46 次来自独立 kernel 计时和包含传输的实验各 3 次预热 + 20 次重复。
+
+优化重点据此放在减少 kernel 数、消除重复读取、整数编码和 NVFP4 缩放阈值比较。性能幅度以 [无插桩同机对比](REPORT_4090D.md) 为准。寄存器和静态局部/共享内存使用量另保存在 [resources.txt](results/4090d/after/resources.txt)。
+
+
+## Nsight Compute 权限
+
+NCU 2025.1.0 已能识别设备，但返回 `ERR_NVGPUCTRPERM`。宿主机 `RmProfilingAdminOnly=1`，容器缺少 CAP_SYS_ADMIN，容器内 root 不能自行开放计数器。这次保留 [原始错误](results/4090d/after/ncu.txt)，没有硬件 DRAM 利用率、实际 occupancy 或 stall 指标。Nsight Systems 时间线、CUDA event 对比和反汇编证据均已完成。
+
+若后续算力提供方开放性能计数器，可继续用 `ncu --set full --launch-count 10 ...` 补充硬件分析，不必重写实现。
+
+---
+
+# 本机 WSL 工具设置（首版环境）
 
 ## 是否为验收必需
 
