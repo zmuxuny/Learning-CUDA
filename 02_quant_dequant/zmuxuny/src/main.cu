@@ -62,6 +62,7 @@ int main(int argc, char **argv) try {
     write_tensor(required(o, "output"), y);
     log_json(required(o, "log"), {{"dequant_ms", ms}},
              {{"gpu", gpu_name()},
+            {"platform", compute_platform()},
               {"fp8_encoding", fp8_encoding_backend()},
               {"mode", mode}});
     return 0;
@@ -151,6 +152,7 @@ int main(int argc, char **argv) try {
   write_tensor(required(o, "output"), y);
   log_json(required(o, "log"), metrics,
            {{"gpu", gpu_name()},
+            {"platform", compute_platform()},
             {"fp8_encoding", fp8_encoding_backend()},
             {"format", get(cfg, "format", "mxfp8")},
             {"rounding", get(cfg, "rounding", "nearest")},

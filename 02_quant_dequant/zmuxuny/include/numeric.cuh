@@ -7,11 +7,26 @@
 #ifndef LP_NATIVE_FP8
 #define LP_NATIVE_FP8 0
 #endif
+#if LP_NATIVE_FP8 && defined(__MACACC__)
+#error "Native NVIDIA FP8 encoding is unavailable on MACA; use the software target"
+#endif
 #if LP_NATIVE_FP8 && defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
 #error "The optional native FP8 comparison requires ARCH=89 or newer"
 #endif
 
 namespace lp {
+#if defined(__MACACC__)
+constexpr unsigned long long FULL_WARP_MASK = ~0ULL;
+#else
+constexpr unsigned FULL_WARP_MASK = 0xffffffffU;
+#endif
+inline const char *compute_platform() {
+#if defined(__MACACC__)
+  return "metax_maca";
+#else
+  return "nvidia_cuda";
+#endif
+}
 inline const char *fp8_encoding_backend() {
   return LP_NATIVE_FP8 ? "native_rne_software_sr" : "software";
 }
@@ -21,7 +36,7 @@ enum Format { MXFP8 = 0, NVFP4 = 1 };
 // Use native round-to-nearest BF16 conversion on Ampere+, with the original
 // bit-exact integer implementation for the CPU and older architectures.
 __host__ __device__ inline uint16_t bf16(float x) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#if !defined(__MACACC__) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   uint16_t result;
   asm("cvt.rn.bf16.f32 %0, %1;" : "=h"(result) : "f"(x));
   return result;

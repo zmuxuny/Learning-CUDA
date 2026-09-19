@@ -16,7 +16,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--trials", type=int, default=3)
     p.add_argument("--repeats", type=int, default=100)
+    p.add_argument("--binary", type=Path, default=ROOT / "build/quantize")
+    p.add_argument("--output-dir", type=Path, default=ROOT / "results")
     a = p.parse_args()
+    a.output_dir.mkdir(parents=True, exist_ok=True)
     records = []
     with tempfile.TemporaryDirectory(prefix="quant-bench-") as tmp:
         t = Path(tmp)
@@ -32,7 +35,7 @@ def main():
                         for _ in range(a.trials):
                             subprocess.run(
                                 [
-                                    str(ROOT / "build/quantize"),
+                                    str(a.binary.resolve()),
                                     "--input",
                                     str(t / "input"),
                                     "--config",
@@ -72,7 +75,7 @@ def main():
                             record["median"]["quant_ms"],
                             flush=True,
                         )
-    (ROOT / "results/benchmark.json").write_text(json.dumps(records, indent=2) + "\n")
+    (a.output_dir / "benchmark.json").write_text(json.dumps(records, indent=2) + "\n")
 
 
 if __name__ == "__main__":

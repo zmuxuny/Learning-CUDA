@@ -1,5 +1,7 @@
 # MXFP8 / NVFP4 软件量化与反量化
 
+新增 **MetaX C500** 支持：构建使用 `make PLATFORM=metax`，可执行文件位于 `build/metax/`；完整环境、正确性、调优和 mcTracer 证据见 [C500 报告](REPORT_C500.md)。
+
 最新结果见 [RTX 4090 D 第二轮优化报告](REPORT_TUNING.md)：包含向量化量化/反量化、BF16 转换、软件舍入优化，以及独立的原生 FP8 对照。第一轮数据保留在 [4090 D 首轮报告](REPORT_4090D.md)，原 3060 数据保留在 [首版报告](REPORT.md)。
 
 题目 2，提交 ID：`zmuxuny`。默认程序为纯 CUDA 软件实现，编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。

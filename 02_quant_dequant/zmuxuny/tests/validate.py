@@ -132,6 +132,14 @@ def main():
         cases.append(
             (np.concatenate((points, -points)).reshape(1, -1), 1, 0, 0, True, False, 16)
         )
+    if not args.quick:
+        # Exercise both sides of C500's scalar/vector dispatch boundary, including
+        # stochastic/tensor scaling and all dequantized output precisions.
+        for rows, fmt, dtype, stochastic in itertools.product(
+            [63, 64, 65], range(2), range(2), range(2)
+        ):
+            cases.append((generate(rows, 1024, "normal", rows), fmt, dtype,
+                          rows % 3, rows == 64, stochastic, 32 if fmt == 0 else 16))
     with tempfile.TemporaryDirectory(prefix="lp-test-") as tmp:
         t = Path(tmp)
         for i, (x, fmt, dtype, out, tensor, stochastic, block) in enumerate(cases):

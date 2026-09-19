@@ -66,7 +66,7 @@ __global__ void quant_vector_kernel(const void *x, uint8_t *data, uint8_t *scale
   unsigned s = 0;
   if (threadIdx.x % WIDTH == 0)
     s = p.tensor ? scales[0] : (FMT == MXFP8 ? mx_scale(a) : encode8((a / global) / 6));
-  s = __shfl_sync(0xffffffff, s, 0, WIDTH);
+  s = __shfl_sync(FULL_WARP_MASK, s, 0, WIDTH);
   if (valid && !p.tensor && threadIdx.x % WIDTH == 0)
     scales[i / B] = uint8_t(s);
   float scale = scale_value(uint8_t(s), FMT);
@@ -125,7 +125,7 @@ template <int TYPE> __device__ __forceinline__ unsigned pack_pair(float lo, floa
     __half2 h = __floats2half2_rn(lo, hi);
     return *reinterpret_cast<unsigned *>(&h);
   } else {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#if !defined(__MACACC__) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     unsigned bits;
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(bits) : "f"(hi), "f"(lo));
     return bits;
