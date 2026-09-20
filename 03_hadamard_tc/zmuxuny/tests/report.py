@@ -1,4 +1,4 @@
-"""Rebuild this project report and plots from experimental JSON."""
+"""Rebuild the initial RTX 3060 experiment archive and plot from its JSON."""
 
 import json
 from pathlib import Path
@@ -161,7 +161,7 @@ def main():
         ]
         for r in quality
     ]
-    hdoc = f"""# 题目 3 总结报告：Hadamard 加速与量化融合
+    hdoc = f"""# 题目 3 首版实验归档：Hadamard 加速与量化融合
 
 作者：zmuxuny
 
@@ -239,10 +239,10 @@ NVFP4 融合结果（已包含全局缩放所需预处理）：
     title, rest = hdoc.split("\n", 1)
     hdoc = (
         title
-        + "\n\n> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前优化实现、4090 D 同机前后对比和工具检查见 [RTX 4090 D 优化报告](REPORT_4090D.md)。\n"
+        + "\n\n> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前实现与结论见 [总结报告](REPORT.md)；本文中的“当前”“下一步”均指首版实验时点。\n"
         + rest
     )
-    (H / "REPORT.md").write_text(hdoc)
+    (H / "REPORT_3060_INITIAL.md").write_text(hdoc)
 
 
 if __name__ == "__main__":
