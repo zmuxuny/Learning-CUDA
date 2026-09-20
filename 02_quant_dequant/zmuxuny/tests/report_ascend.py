@@ -167,7 +167,7 @@ def main():
         "",
         "上述流水线比率来自工具，可能与其他流水线重叠，不能相加当作总时间分解。小规模采样用于核验执行路径；大尺寸结论使用独立基准。",
         "",
-        f'mssanitizer 基础模式共 **{passed}/{len(sanitize["records"])} 次**满足：进程退出为零、实际 kernel 检查开始与完成次数一致、全部明确无错误且无警告。本轮实际执行基础 memcheck；racecheck/initcheck/synccheck 要求源码插桩，当前未能执行，不计作通过。[检查汇总及日志](results/ascend/sanitize/summary.json)。',
+        f'mssanitizer 基础模式共 **{passed}/{len(sanitize["records"])} 次**满足：进程退出为零、实际 kernel 检查开始与完成次数一致、全部明确无错误且无警告。该平台实验实际执行基础 memcheck；racecheck/initcheck/synccheck 要求源码插桩，当前未能执行，不计作通过。[检查汇总及日志](results/ascend/sanitize/summary.json)。',
         "",
         "完整 `--cce-enable-sanitizer` 源码插桩未通过本镜像的构建/运行验证，不能把基础模式结果表述为全量插桩通过。直接编译及最小样例触发毕昇后端 FrameIndex 错误；分阶段实验超时，原始记录见 [工具限制](results/ascend/tools_limitations/sanitizer_build_debug.log)。基础模式发现的向量掩码恢复警告已修复并复测。",
         "",
@@ -273,3 +273,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    from report_final import finalize_platform_report
+    finalize_platform_report(ROOT, 'ascend')

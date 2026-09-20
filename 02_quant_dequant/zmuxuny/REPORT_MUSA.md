@@ -2,6 +2,20 @@
 
 实测日期：2026-09-20。训练营 ID：曹泽阳；提交目录：`zmuxuny`。
 
+<!-- final-total-start -->
+## 总体优化结果
+
+128 MiB FP16 输入，默认块缩放、nearest。总加速比 = 基线耗时 / 最终耗时；耗时减少 = 1 − 最终耗时 / 基线耗时。
+
+比较完整量化流程，NVFP4 包含全局 amax；反量化单列，不与量化加速比混用。
+
+| 形状 / dtype | 格式 | 基线 ms | 最终 ms | 总加速比 | 耗时减少 |
+|---|---|---|---|---|---|
+| 65536×1024 / fp16 | mxfp8 | 0.89633 | 0.76282 | 1.18× | 14.9% |
+| 65536×1024 / fp16 | nvfp4 | 36.03870 | 2.93358 | 12.28× | 91.9% |
+
+<!-- final-total-end -->
+
 ## 环境与复现
 
 单卡 MTT S4000，48GB 显存、64 个计算单元；MUSA SDK / mcc 4.3.6，目标 `mp_22`。`mthreads-gmi` 的驱动字符串为 `3.3.5-server`，运行时查询为 4.3。使用 `MUSA_VISIBLE_DEVICES=0` 固定单卡。设备属性报告物理 wave 为 128 线程；编译器 shuffle 接口使用 32 线程逻辑组，矩阵指令覆盖 128 线程。[环境记录](results/musa/environment.txt)、[SDK 版本](results/musa/sdk_version.json)。
@@ -45,9 +59,7 @@ after: bb09bf004ba4326d9355ce5b1e4a71723ef896d05bf527cd5dc88232e4aef50f
 
 可在本目录副本中执行 `patch -p1 < results/musa/initial_port.patch` 还原基线，再 `make -B PLATFORM=musa`。补丁仅用于独立副本。
 
-![S4000 性能对照](results/musa/performance.png)
-
-| 行数（列数 1024） | 输入 / 格式 | 初始量化 μs | 当前量化 μs | 加速比 | 当前反量化 μs |
+| 行数（列数 1024） | 输入 / 格式 | 基线量化 μs | 当前量化 μs | 加速比 | 当前反量化 μs |
 |---:|---|---:|---:|---:|---:|
 | 32 | fp32 / mxfp8 | 15.68 | 10.60 | 1.48× | 8.27 |
 | 32 | fp32 / nvfp4 | 222.28 | 104.75 | 2.12× | 27.89 |
@@ -83,4 +95,4 @@ after: bb09bf004ba4326d9355ce5b1e4a71723ef896d05bf527cd5dc88232e4aef50f
 
 ## 复核材料
 
-代码旁注明线程组、fragment 坐标、舍入语义与平台兼容处理；原始数据保存在 `results/musa/`，源码 SHA256 清单见 [source_sha256.json](results/musa/source_sha256.json)。旧平台归档结果对应各自原始环境；本轮公共代码回归在 S4000 与 RTX 3060 完成。
+代码旁注明线程组、fragment 坐标、舍入语义与平台兼容处理；原始数据保存在 `results/musa/`，源码 SHA256 清单见 [source_sha256.json](results/musa/source_sha256.json)。旧平台归档结果对应各自原始环境；该平台实验公共代码回归在 S4000 与 RTX 3060 完成。

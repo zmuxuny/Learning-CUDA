@@ -2,6 +2,20 @@
 
 实测日期：2026-09-20。训练营 ID：曹泽阳；提交目录：`zmuxuny`。
 
+<!-- final-total-start -->
+## 总体优化结果
+
+128 MiB FP16 输入，默认块缩放、nearest。总加速比 = 基线耗时 / 最终耗时；耗时减少 = 1 − 最终耗时 / 基线耗时。
+
+比较完整量化流程，NVFP4 包含全局 amax；反量化单列，不与量化加速比混用。
+
+| 形状 / dtype | 格式 | 基线 ms | 最终 ms | 总加速比 | 耗时减少 |
+|---|---|---|---|---|---|
+| 65536×1024 / fp16 | mxfp8 | 0.51313 | 0.51324 | 1.00× | -0.0% |
+| 65536×1024 / fp16 | nvfp4 | 1.08742 | 0.81770 | 1.33× | 24.8% |
+
+<!-- final-total-end -->
+
 ## 环境与复现
 
 单卡 Iluvatar MR-V100，32GiB 显存，16 个计算单元，原生 warp 为 64 线程。
@@ -41,8 +55,6 @@ RTX 3060 / sm_86 完整回归 **182 组通过**：[记录](results/iluvatar/corr
 在同一张 MR-V100 上交替执行基线与当前版本，每项 3 次独立试验，取设备事件计时的中位数。预热 3 次，小规模重复 100 次，大规模重复 30 次。包含完整 GPU 流程，排除文件读写、主机传输和 CPU 参考。每次验证 packed SHA256 一致。
 基线：MR-V100 correct initial port: NVIDIA launch geometry and vector amax。完整逐次时间与二进制哈希见 [comparison.json](results/iluvatar/comparison.json)；[initial_port.patch](results/iluvatar/initial_port.patch) 可在本目录副本中通过 `patch -p1 < results/iluvatar/initial_port.patch` 还原正确性已通过的初始移植源码，再执行 `make -B PLATFORM=iluvatar`。
 基线和当前程序可用 `tests/benchmark_tuning.py --before <基线> --after <当前> --output <JSON> --trials 3` 重新比较。补丁包含该基线所需的构建和平台兼容代码。
-
-![MR-V100 性能对照](results/iluvatar/performance.png)
 
 | 元素数 | 输入 | 格式 | 量化基线 μs | 量化当前 μs | 加速比 | 当前反量化 μs（FP32） |
 |---:|---|---|---:|---:|---:|---:|

@@ -32,7 +32,7 @@ python3 tests/benchmark.py
 
 | 平台 | 构建 | 二进制目录 | 实测与分析 |
 |---|---|---|---|
-| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_TUNING.md)、[3060 首版归档](REPORT_3060_INITIAL.md) |
+| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_4090D.md) |
 | MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
 | Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
 | Moore Threads MTT S4000 | `make PLATFORM=musa` | `build/musa/` | [S4000 报告](REPORT_MUSA.md) |
@@ -108,7 +108,7 @@ BF16 以 16 位原始位模式存储，使用整数实现 RNE 转换，在 `sm_7
 
 实测结果及分析见 [REPORT.md](REPORT.md)，原始数据见 [results/](results/)。
 
-工具检查脚本为 `tests/profile.py`，可用 `--ncu`、`--sanitizer` 指定可用工具路径；仅检查本题。本机 WSL 的 profiler / 调试接口限制及失败日志单独记录，不计作检查通过。`python3 tests/report.py` 仅从首版 JSON 重建 `REPORT_3060_INITIAL.md` 与图，额外依赖 Matplotlib；不会覆盖当前总结报告。
+工具检查脚本为 `tests/profile.py`，可用 `--ncu`、`--sanitizer` 指定可用工具路径；仅检查本题。本机 WSL 的 profiler / 调试接口限制及失败日志单独记录，不计作检查通过。`python3 tests/report.py` 从已提交 JSON 重建总收益数据及平台性能表；总加速比使用起始基线与最终实现的耗时直接计算。
 
 原生 Linux 分析结果及本机 WSL 设置说明见 [PROFILING.md](PROFILING.md)。
 
@@ -123,11 +123,11 @@ python3 tests/profile_native.py
 python3 tests/report_4090.py
 ```
 
-大张量前后交替比较可用 `tests/benchmark_extended.py --before /path/to/old/quantize --after build/quantize`。`tests/report.py` 对应首版数据；`tests/report_4090.py` 使用独立归档的 4090 D 结果。
+大张量前后交替比较可用 `tests/benchmark_extended.py --before /path/to/old/quantize --after build/quantize`。`tests/report_4090.py` 生成 NVIDIA 最终性能报告；原始测量数据按设备保存。
 
 ## 软件优化与可选硬件转换
 
-NVIDIA 后端量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [4090 D 实验报告](REPORT_TUNING.md)。
+NVIDIA 后端量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [4090 D 实验报告](REPORT_4090D.md)。
 
 额外的 Ada FP8 转换对照使用独立可执行文件，不改变默认程序；需要 CUDA >=12.1 和 `sm_89` 或更新：
 

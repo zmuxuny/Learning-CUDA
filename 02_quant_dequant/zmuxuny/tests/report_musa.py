@@ -112,9 +112,11 @@ def main():
               '代码旁注明线程组、fragment 坐标、舍入语义与平台兼容处理；'
               '原始数据保存在 `results/musa/`，源码 SHA256 清单见 '
               '[source_sha256.json](results/musa/source_sha256.json)。'
-              '旧平台归档结果对应各自原始环境；本轮公共代码回归在 S4000 与 RTX 3060 完成。', '']
+              '旧平台归档结果对应各自原始环境；该平台实验公共代码回归在 S4000 与 RTX 3060 完成。', '']
     (ROOT/'REPORT_MUSA.md').write_text('\n'.join(lines))
 
 
 if __name__ == '__main__':
     main()
+    from report_final import finalize_platform_report
+    finalize_platform_report(ROOT, 'musa')

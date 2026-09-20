@@ -1,74 +1,96 @@
-# RTX 4090 D 优化实验
+# RTX 4090 D 最终性能报告
 
-本页为第一轮已归档结果。最新实现与第二轮对比见 [REPORT_TUNING.md](REPORT_TUNING.md)。
+实测日期：2026-09-19。RTX 4090 D 24 GiB、CUDA 12.8、驱动 570.124.06、GCC 13，目标 sm_89，保留 `--fmad=false`。默认程序使用软件 FP8/FP4 编码；原生 E4M3 转换是独立可选对照。
 
-实测日期：2026-09-19。基线为本题首版提交 `73b66de`（与实际构建的本地集成快照 `deba5cb` 对应目录完全相同），优化前后均在同一台 RTX 4090 D 24 GiB 上执行。CUDA 12.8、驱动 570.124.06、GCC 13，编译目标 `sm_89`，使用 `-O3 --fmad=false -lineinfo`。环境和基线可执行文件 SHA256 见 [environment.json](results/4090d/environment.json)。
+## 基线、计时与总收益定义
 
-## 测量方法
+起始基线固定为 `73b66de`（对应实验快照 `deba5cb`），最终实现固定为 [设备实验中软件程序的 SHA256](results/4090d/tuning/comparison.json)。总加速比 = 起始基线耗时 / 最终耗时；耗时减少 = 1 − 最终耗时 / 起始基线耗时。
 
-常规基准每配置运行 3 个独立进程，每进程预热 3 次、CUDA event 重复 100 次，取时间中位数。大张量每配置同样 3 次，重复 30 次；优化前后进程交替运行以减少温度与时钟漂移的影响。GPU 未锁频。表内加速比统一按两个时间中位数之比计算。
+两端来自同一台设备、相同形状/dtype/格式的分批归档测量，各含 3 次独立进程，预热 3 次，常规尺寸重复 100 次、128 MiB 重复 30 次，取中位数。GPU 未锁频；这是归档端点的直接比较，并非一次新的基线/最终交替重测。输入 seed=42、标准正态、默认块缩放、nearest。
 
-kernel 计时不含文件 I/O、CPU 参考、设备分配和传输；NVFP4 的计时包含全局 amax 清零、归约和输出阶段。输入驻留设备且重复访问，常规尺寸可能受 L2 缓存加速，因此另测单个输入即为 128 MiB 的大张量。有效 GB/s 是逻辑读写量除以时间，不作为 DRAM 利用率。
+设备事件时间包含该流程全部 kernel，NVFP4 包含全局 amax；排除分配、文件 I/O、主机参考与传输。常规尺寸可受缓存影响，128 MiB 输入超过 72 MiB L2。
 
-## 实现变化
+原始数据：[常规尺寸基线](results/4090d/before/benchmark.json)、[128 MiB 基线](results/4090d/extended.json)、[最终实现](results/4090d/tuning/comparison.json)。可用 `python3 tests/report_4090.py` 从这些 JSON 重建本报告。
 
-- 默认 32/16 元素块将块 amax、scale 编码、元素量化与 packed 写出合并为一个 kernel，输入只读一遍。整块对齐的行使用连续一维 tile；非整块和奇数列保留按行索引，NVFP4 每个字节仅一个线程写入。
-- FP8 编码从 FP32 位域提取指数、尾数和舍入残数；FP8/FP4 解码直接构造浮点位域。NVFP4 最近舍入直接比较 scale 乘以精确 FP4 中点，避免再做一次除法，并穷举所有正 E4M3 scale 下的中点及相邻 ULP 验证；随机舍入保留原商与概率。MXFP8 使用精确二次幂倒数乘法，E8M0 最小 scale 的特殊情况仍用除法。随机舍入、最近偶数舍入和文件格式保持一致。
-- 全局 amax 先归约到每个 warp，再通过共享内存归约到整个 CTA，将原子更新从每 warp 一次降至每 CTA 一次。
-- 默认格式的反量化专门化索引，NVFP4 一次读取一个字节、输出两个值。自定义块长沿用通用 kernel。
+## 总体优化结果
 
-## 常规尺寸：1024×1024，标准正态
+比较完整软件量化流程，反量化另列；不把可选原生 FP8 的收益计入软件实现。
 
-| 输入 | 格式 | 量化前/后 μs | 量化加速 | 反量化前/后 μs | 反量化加速 |
-| --- | --- | --- | --- | --- | --- |
-| fp32 | mxfp8 | 17.603 / 6.461 | 2.72× | 7.977 / 4.403 | 1.81× |
-| fp32 | nvfp4 | 33.536 / 13.537 | 2.48× | 8.704 / 4.781 | 1.82× |
-| fp16 | mxfp8 | 17.777 / 6.451 | 2.76× | 7.976 / 4.413 | 1.81× |
-| fp16 | nvfp4 | 34.007 / 13.517 | 2.52× | 8.724 / 4.792 | 1.82× |
+| 形状 / dtype | 格式 | 基线 ms | 最终 ms | 总加速比 | 耗时减少 |
+|---|---|---|---|---|---|
+| 1024×1024 / fp32 | mxfp8 | 0.01760 | 0.00336 | 5.24× | 80.9% |
+| 1024×1024 / fp32 | nvfp4 | 0.03354 | 0.00825 | 4.06× | 75.4% |
+| 1024×1024 / fp16 | mxfp8 | 0.01778 | 0.00330 | 5.39× | 81.5% |
+| 1024×1024 / fp16 | nvfp4 | 0.03401 | 0.00780 | 4.36× | 77.1% |
+| 32768×1024 / fp32 | mxfp8 | 0.49132 | 0.17841 | 2.75× | 63.7% |
+| 32768×1024 / fp32 | nvfp4 | 0.98608 | 0.30430 | 3.24× | 69.1% |
+| 65536×1024 / fp16 | mxfp8 | 0.96768 | 0.21292 | 4.54× | 78.0% |
+| 65536×1024 / fp16 | nvfp4 | 1.93283 | 0.33219 | 5.82× | 82.8% |
 
-所有 24 组常规基准的 MAE、MSE 和最大绝对误差与基线一致。完整均匀分布、正态、异常值，以及 per-tensor/per-block 和 FP16/FP32 数据见 `before/benchmark.json`、`after/benchmark.json`。
 
-## 大张量：输入 128 MiB
+## 反量化最终结果
 
-本轮沿用格式预设：MXFP8 反量化输出 FP16，NVFP4 反量化输出 FP32；同一行的优化前后输出类型相同。第二轮改为统一 FP32 输出，反量化耗时不能跨报告直接比较。
+最终统一输出 FP32。MXFP8 的 128 MiB 基线输出 FP16，与最终输出类型不同，因此只报告最终耗时，不计算该项加速比。
 
-| 输入形状 / dtype | 格式 | 量化前/后 μs | 加速 | 反量化前/后 μs | 加速 |
-| --- | --- | --- | --- | --- | --- |
-| 32768×1024 / fp32 | mxfp8 | 491.32 / 190.74 | 2.58× | 238.59 / 137.83 | 1.73× |
-| 32768×1024 / fp32 | nvfp4 | 986.08 / 415.64 | 2.37× | 271.43 / 168.86 | 1.61× |
-| 65536×1024 / fp16 | mxfp8 | 967.68 / 349.08 | 2.77× | 475.07 / 274.15 | 1.73× |
-| 65536×1024 / fp16 | nvfp4 | 1932.83 / 752.09 | 2.57× | 540.02 / 338.16 | 1.60× |
+| 形状 / 输入 dtype | 格式 | 基线 ms | 最终 ms | 总加速比 |
+|---|---|---|---|---|
+| 1024×1024 / fp32 | mxfp8 | 0.00798 | 0.00350 | 2.28× |
+| 1024×1024 / fp32 | nvfp4 | 0.00870 | 0.00351 | 2.48× |
+| 1024×1024 / fp16 | mxfp8 | 0.00798 | 0.00348 | 2.29× |
+| 1024×1024 / fp16 | nvfp4 | 0.00872 | 0.00344 | 2.54× |
+| 32768×1024 / fp32 | mxfp8 | —（FP16 输出） | 0.18418 | — |
+| 32768×1024 / fp32 | nvfp4 | 0.27143 | 0.16886 | 1.61× |
+| 65536×1024 / fp16 | mxfp8 | —（FP16 输出） | 0.36799 | — |
+| 65536×1024 / fp16 | nvfp4 | 0.54002 | 0.33744 | 1.60× |
 
-## 正确性
 
-独立 NumPy 码本 oracle 通过 **158 组测试及 3 组无效文件测试**。新增超过 65535 行的单列张量、全块极小 FP32 和大数，覆盖新网格索引及 E8M0 倒数边界。packed data、scales 和重建值逐项比较。
+## 最终软件与原生转换对照
 
-![同一 GPU 优化前后延迟](results/4090d/comparison.png)
+单位 ms。该表隔离 E4M3 转换实现的差异，不作为另一段累计加速。
 
-## Profiler / Sanitizer
+| 形状 / dtype | 格式 | 软件量化 | 原生 FP8 对照 |
+|---|---|---|---|
+| 32×1024 / fp32 | mxfp8 | 0.00212 | 0.00209 |
+| 32×1024 / fp32 | nvfp4 | 0.00557 | 0.00549 |
+| 1024×1024 / fp32 | mxfp8 | 0.00336 | 0.00316 |
+| 1024×1024 / fp32 | nvfp4 | 0.00825 | 0.00810 |
+| 32×1024 / fp16 | mxfp8 | 0.00208 | 0.00205 |
+| 32×1024 / fp16 | nvfp4 | 0.00548 | 0.00545 |
+| 1024×1024 / fp16 | mxfp8 | 0.00330 | 0.00303 |
+| 1024×1024 / fp16 | nvfp4 | 0.00780 | 0.00771 |
+| 32768×1024 / fp32 | mxfp8 | 0.17841 | 0.17818 |
+| 32768×1024 / fp32 | nvfp4 | 0.30430 | 0.30426 |
+| 65536×1024 / fp16 | mxfp8 | 0.21292 | 0.21299 |
+| 65536×1024 / fp16 | nvfp4 | 0.33219 | 0.32966 |
 
-Compute Sanitizer 的 memcheck、racecheck、synccheck 共 **12 次检查全部通过**；原始命令及输出见 `results/4090d/after/*check_*.txt`，状态汇总见 [profiling.json](results/4090d/after/profiling.json)。
 
-Nsight Systems 成功采集 MXFP8/NVFP4 两组 CUDA 时间线，原始 `.nsys-rep` 可在 GUI 打开，kernel/API 汇总见 `nsys_stats_*.csv`。具体 kernel 耗时、调用次数及瓶颈分析见 [PROFILING.md](PROFILING.md)。
+## 最终实现与参数选择
 
-Nsight Compute 返回 `ERR_NVGPUCTRPERM`，该容器所在宿主机限制硬件计数器访问；保留 `ncu.txt` 原始输出。本报告的性能结论使用无插桩 CUDA event 基准，时间线用于确认执行步骤，未把工具失败计作通过。
+默认块对齐输入使用每线程处理 4 个元素、128 线程/CTA。FP32 使用 float4 读取，FP16 使用打包向量读取；在更小的 warp 子组中计算块 amax，打包后连续写出。非整块、奇数列和自定义块长仍使用已验证的通用路径。随机数继续按元素线性索引生成，线程映射变化不会改变随机舍入结果。
 
-## 复现
+反量化 FP32 输出采用每线程 4 元素、256 线程/CTA；FP16/BF16 输出采用每线程 8 元素、128 线程/CTA。全局 amax 使用每线程 8 元素的向量加载、256 线程/CTA，最多 512 个 CTA，最后每 CTA 只做一次原子最大值更新；不满向量的尾部单独读取。
 
-```bash
-make clean
-make ARCH=89 NVCC=/usr/local/cuda/bin/nvcc HOSTCXX=g++
-python3 tests/validate.py
-python3 tests/benchmark.py --trials 3 --repeats 100
-python3 tests/profile_native.py
-# 分别从基线提交和当前提交构建两个可执行文件：
-python3 tests/benchmark_extended.py --before /path/to/baseline/quantize --after build/quantize
-# 归档 JSON 后重建本报告和图：
-python3 tests/report_4090.py
-```
+[量化扫描](results/4090d/tuning/tune_vector.csv)、[反量化扫描](results/4090d/tuning/tune_dequant.csv)、[amax 扫描](results/4090d/tuning/tune_max.csv) 保留不同向量宽度、线程块和归约网格的 3 次测量。量化扫描的 kernel 时间不包含 NVFP4 全局归约；正文表格包含它，二者加速比不能混用。
 
-基线与新版本原始 JSON 分别保存在 `results/4090d/before/` 和 `after/`，大张量交替试验见 `extended.json`。原 RTX 3060 Laptop 数据保留在 `results/` 根目录和原报告中。
+[复制带宽对照](results/4090d/tuning/copy_ceiling.csv) 在 128 MiB 输入上测得 SM 向量复制约 924 GB/s、cudaMemcpy D2D 约 945 GB/s，按读+写逻辑字节计算。FP32 MXFP8 大张量量化已接近该逻辑带宽数量级，进一步减少编码计算的收益较小；这不是硬件 DRAM 利用率或绝对性能上限。只有 64 MiB 的 FP16 amax 微基准输入可放进 L2，不能将其加速直接外推到 128 MiB 完整流程。
 
-## 旧 Toolkit 兼容验证
 
-另在本机 RTX 3060 Laptop / CUDA 11.5 / GCC 10.5 上通过相同正确性测试；题目 2 编译目标 sm_75，题目 3 编译目标 sm_86 并验证新 Tensor Core 路径。结果见 [compatibility_3060.json](results/compatibility_3060.json)。
+## 可选原生 FP8 对照
+
+默认 `make` 仍构建软件 E4M3/E2M1 编码。额外执行 `make native ARCH=89` 可生成独立的 `_native` 程序，要求 CUDA >=12.1 和 sm_89 或更新；两路可以同时存在。原生对照使用 `cvt.rn.satfinite.e4m3x2.f32` 一次转换两个相邻值，低/高字节顺序与 packed 格式一致。随机舍入沿用软件编码，NVFP4 的 E2M1 数据仍由软件编码，只有 E4M3 scale 可用原生转换。日志 `fp8_encoding` 明确区分两路。
+
+指令与架构依据：[NVIDIA PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cvt)。这个对照不替代题目 2 的软件实现，也不是 FP8/FP4 Tensor Core 矩阵乘法。
+
+
+## 正确性与工具证据
+
+- 软件实现：158 组通过；[记录](results/4090d/tuning/correctness.json)。
+- 原生转换对照：158 组通过；[记录](results/4090d/tuning/correctness_native.json)。
+
+软件及原生两路共 48 次 memcheck/racecheck/synccheck 通过；[软件检查](results/4090d/tuning/software/profiling.json)、[原生检查](results/4090d/tuning/native/profiling.json)。Nsight Systems 时间线与指令证据见 [工具分析](PROFILING.md)；NCU 计数器受宿主机权限限制。
+
+当前公共计算代码的 RTX 3060 回归另见 [测试记录](results/ascend/correctness_nvidia_regression.json)。本页性能对应所链接的 4090 D 实验二进制。
+
+## 运行与复现
+
+按 [README](README.md) 构建软件或原生转换程序，使用 `tests/validate.py` 验证。`tests/benchmark_tuning.py --before <基线程序> --after <最终程序> --native <原生对照程序> --output <结果.json>` 可重新采集同机对照；输入和计时配置应与本页一致。原始环境、命令与二进制哈希见 [环境记录](results/4090d/tuning/environment.json)。

@@ -90,3 +90,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+    from report_final import finalize_platform_report
+    finalize_platform_report(ROOT, 'c500')

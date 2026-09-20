@@ -4,6 +4,20 @@
 
 完成原生 Ascend C 实现，182 组正确性测试通过；基础 memcheck 4 组和 msprof 4 组均完成。128MiB FP16/NVFP4 完整量化从 307.118 ms 降至 102.372 ms，为初始正确移植的 3.00×；同表保留反量化的改善或回退。
 
+<!-- final-total-start -->
+## 总体优化结果
+
+128 MiB FP16 输入，默认块缩放、nearest。总加速比 = 基线耗时 / 最终耗时；耗时减少 = 1 − 最终耗时 / 基线耗时。
+
+比较完整量化流程，NVFP4 包含全局 amax；反量化单列，不与量化加速比混用。
+
+| 形状 / dtype | 格式 | 基线 ms | 最终 ms | 总加速比 | 耗时减少 |
+|---|---|---|---|---|---|
+| 65536×1024 / fp16 | mxfp8 | 103.24389 | 88.04860 | 1.17× | 14.7% |
+| 65536×1024 / fp16 | nvfp4 | 307.11759 | 102.37211 | 3.00× | 66.7% |
+
+<!-- final-total-end -->
+
 ## 环境与运行
 
 单卡 Ascend 910B2，64GB HBM，ARM64 鲲鹏主机；CANN 9.0、毕昇编译器及驱动 26.1.1。ACL 使用容器内逻辑设备 0，`npu-smi` 显示物理卡 1。AIV 编译目标为 `dav-c220-vec`，Cube 为 `dav-c220-cube`；调度上限分别为 48 和 24 个 block。[完整环境](results/ascend/environment.txt)。
@@ -38,9 +52,7 @@ python3 tests/profile_ascend.py --tool sanitize
 
 [完整逐次记录及可执行文件/动态库 SHA256](results/ascend/comparison.json)。基线及全部可执行文件另存于完整实验备份；正式代码、构建日志和源码校验清单随提交提供。
 
-![性能对照](results/ascend/performance.png)
-
-| 输入 MiB | dtype / 格式 | 初始量化 μs | 当前量化 μs | 加速比 | 初始反量化 μs | 当前反量化 μs |
+| 输入 MiB | dtype / 格式 | 基线量化 μs | 当前量化 μs | 加速比 | 基线反量化 μs | 当前反量化 μs |
 |---:|---|---:|---:|---:|---:|---:|
 | 0.125 | fp32 / mxfp8 | 63.80 | 66.61 | 0.96× | 35.48 | 35.48 |
 | 0.125 | fp32 / nvfp4 | 196.02 | 88.12 | 2.22× | 43.73 | 43.76 |
@@ -72,7 +84,7 @@ msprof 采集 4 组格式/dtype 用例，导出任务时间与 PipeUtilization �
 
 上述流水线比率来自工具，可能与其他流水线重叠，不能相加当作总时间分解。小规模采样用于核验执行路径；大尺寸结论使用独立基准。
 
-mssanitizer 基础模式共 **4/4 次**满足：进程退出为零、实际 kernel 检查开始与完成次数一致、全部明确无错误且无警告。本轮实际执行基础 memcheck；racecheck/initcheck/synccheck 要求源码插桩，当前未能执行，不计作通过。[检查汇总及日志](results/ascend/sanitize/summary.json)。
+mssanitizer 基础模式共 **4/4 次**满足：进程退出为零、实际 kernel 检查开始与完成次数一致、全部明确无错误且无警告。该平台实验实际执行基础 memcheck；racecheck/initcheck/synccheck 要求源码插桩，当前未能执行，不计作通过。[检查汇总及日志](results/ascend/sanitize/summary.json)。
 
 完整 `--cce-enable-sanitizer` 源码插桩未通过本镜像的构建/运行验证，不能把基础模式结果表述为全量插桩通过。直接编译及最小样例触发毕昇后端 FrameIndex 错误；分阶段实验超时，原始记录见 [工具限制](results/ascend/tools_limitations/sanitizer_build_debug.log)。基础模式发现的向量掩码恢复警告已修复并复测。
 
