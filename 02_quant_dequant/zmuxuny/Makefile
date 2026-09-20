@@ -1,3 +1,6 @@
+ifeq ($(PLATFORM),ascend)
+include ascend/Makefile
+else
 PLATFORM ?= nvidia
 MACA_PATH ?= /opt/maca
 COREX_PATH ?= /usr/local/corex
@@ -72,3 +75,5 @@ numeric-test: $(BUILD_DIR)/validate_numeric
 $(BUILD_DIR)/tune_%: tests/tune_%.cu $(wildcard include/*) $(wildcard src/*.cuh) Makefile
 	mkdir -p $(BUILD_DIR)
 	$(NVCC) $(CXXFLAGS) $< -o $@ $(LDLIBS)
+
+endif

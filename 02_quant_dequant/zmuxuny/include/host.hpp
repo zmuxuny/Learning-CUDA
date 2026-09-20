@@ -1,5 +1,9 @@
 #pragma once
+#if defined(LP_ASCEND)
+#include "../ascend/backend.hpp"
+#else
 #include "gpu.cuh"
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstring>

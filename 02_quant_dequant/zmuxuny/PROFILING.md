@@ -1,3 +1,22 @@
+# Ascend 910B2 性能分析与检查
+
+CANN 9.0 提供 `msprof` 与 `mssanitizer`。本项目默认以 `-gline-tables-only` 保留设备行号；性能比较使用独立、未开启工具的 ACL event 运行。命令如下：
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+make PLATFORM=ascend
+python3 tests/profile_ascend.py --tool profile
+python3 tests/profile_ascend.py --tool sanitize
+```
+
+`profile` 收集 `PipeUtilization` 硬件计数器与任务时间，检查导出的每条 kernel 时间是否有效；`sanitize` 默认调用基础 memcheck，要求进程成功退出、kernel 检查完整结束且无错误或警告，才标记 `PASS_BASIC`。两种格式与两种输入精度共 4 个用例，包含尾行和非对齐 DMA。基础 memcheck 使用 7×35 FP32、17×1025 FP16，后者覆盖超过 48 个反量化 tile 的循环调度。
+
+**检查范围：mssanitizer 基础 memcheck。** racecheck、initcheck、synccheck 在非插桩程序上明确提示不支持，未计作通过。需要诊断时可用 `--sanitizer-tools` 显式指定；相关原始日志保存在工具限制目录。 本镜像以 `--cce-enable-sanitizer` 全量插桩编译时，毕昇后端在主机启动函数处报 `Cannot select ... FrameIndex`，最小样例也可复现。设备/主机分开编译的实验能生成程序，但插桩运行未在限时内完成，因此没有计作全量插桩通过。基础模式曾发现归约后未恢复向量掩码，正式内核已在结束前调用 `ResetMask()`。
+
+[昇腾报告](REPORT_ASCEND.md) · [性能采样汇总](results/ascend/profile/summary.json) · [基础检查汇总](results/ascend/sanitize/summary.json)。原始命令、工具日志、二进制及动态库哈希随结果保存；工具内耗时不用于计算性能加速比。
+
+---
+
 # Moore Threads S4000 采样入口
 
 S4000 使用 MUSA 4.3.6。性能比较采用未插桩 MUSA event 计时，参数扫描和完整流程对照见 [S4000 报告](REPORT_MUSA.md)。

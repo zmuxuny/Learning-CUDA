@@ -5,7 +5,7 @@
 - fork：`zmuxuny/Learning-CUDA`
 - head：`projects/quant-dequant`
 - base：`InfiniTensor/Learning-CUDA:2026-summer-project`
-- 标题：`【训练营】【题目2】MXFP8/NVFP4 软件量化与反量化`
+- 标题：`【训练营】【题目2】MXFP8/NVFP4 软件量化与反量化（多平台）`
 
 本题目录内运行：
 

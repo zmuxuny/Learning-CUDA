@@ -2,7 +2,9 @@
 
 // Keep one numeric/kernel implementation. Only runtime names differ for MUSA;
 // device intrinsics and matrix fragments are handled explicitly by each backend.
-#if defined(__MUSACC__)
+#if defined(LP_ASCEND)
+#include "../ascend/platform.hpp"
+#elif defined(__MUSACC__)
 #include <musa_fp16.h>
 #include <musa_runtime.h>
 #define cudaDeviceProp musaDeviceProp

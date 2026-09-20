@@ -1,6 +1,6 @@
 # MXFP8 / NVFP4 软件量化与反量化
 
-支持 NVIDIA CUDA、沐曦 MACA、天数 CoreX 和摩尔线程 MUSA；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
+支持 NVIDIA CUDA、沐曦 MACA、天数 CoreX、摩尔线程 MUSA 和昇腾 CANN；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
 
 | 平台 | 构建 | 二进制目录 | 实测与分析 |
 |---|---|---|---|
@@ -8,10 +8,13 @@
 | MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
 | Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
 | Moore Threads MTT S4000 | `make PLATFORM=musa` | `build/musa/` | [S4000 报告](REPORT_MUSA.md) |
+| Ascend 910B2 | `make PLATFORM=ascend` | `build/ascend/` | [昇腾报告](REPORT_ASCEND.md) |
 
 天数实测 CoreX 4.4.0，默认 `COREX_PATH=/usr/local/corex`、`IVCORE_ARCH=ivcore11`；使用 CoreX clang 编译，运行前设置 `LD_LIBRARY_PATH=$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}`。`make PLATFORM=iluvatar test` 包含数值验证和 49,152 项随机哈希一致性检查。复现性能、Profiler 和 Sanitizer 的命令见对应平台报告。
 
 摩尔线程实测 MUSA 4.3.6 / `mp_22`，默认 `MUSA_PATH=/usr/local/musa`；运行前设置 `MUSA_VISIBLE_DEVICES=0` 和 `LD_LIBRARY_PATH=$MUSA_PATH/lib:${LD_LIBRARY_PATH:-}`。完整数值验证、参数扫描及工具采样命令见 [S4000 报告](REPORT_MUSA.md)。
+
+昇腾实测 ARM64 / CANN 9.0 / 910B2，使用 Ascend C 独立内核和 ACL 运行时。先执行 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`，再运行 `make PLATFORM=ascend test`；测试、性能对照及 msprof / mssanitizer 说明见 [昇腾报告](REPORT_ASCEND.md)。
 
 题目 2，训练营 ID：曹泽阳；提交目录：`zmuxuny`。默认程序为纯 CUDA 软件实现，编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
 
