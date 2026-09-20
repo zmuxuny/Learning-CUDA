@@ -1,22 +1,8 @@
 # MXFP8 / NVFP4 软件量化与反量化
 
-支持 NVIDIA CUDA、沐曦 MACA、天数 CoreX、摩尔线程 MUSA 和昇腾 CANN；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
-
-| 平台 | 构建 | 二进制目录 | 实测与分析 |
-|---|---|---|---|
-| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_TUNING.md)、[3060 报告](REPORT.md) |
-| MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
-| Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
-| Moore Threads MTT S4000 | `make PLATFORM=musa` | `build/musa/` | [S4000 报告](REPORT_MUSA.md) |
-| Ascend 910B2 | `make PLATFORM=ascend` | `build/ascend/` | [昇腾报告](REPORT_ASCEND.md) |
-
-天数实测 CoreX 4.4.0，默认 `COREX_PATH=/usr/local/corex`、`IVCORE_ARCH=ivcore11`；使用 CoreX clang 编译，运行前设置 `LD_LIBRARY_PATH=$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}`。`make PLATFORM=iluvatar test` 包含数值验证和 49,152 项随机哈希一致性检查。复现性能、Profiler 和 Sanitizer 的命令见对应平台报告。
-
-摩尔线程实测 MUSA 4.3.6 / `mp_22`，默认 `MUSA_PATH=/usr/local/musa`；运行前设置 `MUSA_VISIBLE_DEVICES=0` 和 `LD_LIBRARY_PATH=$MUSA_PATH/lib:${LD_LIBRARY_PATH:-}`。完整数值验证、参数扫描及工具采样命令见 [S4000 报告](REPORT_MUSA.md)。
-
-昇腾实测 ARM64 / CANN 9.0 / 910B2，使用 Ascend C 独立内核和 ACL 运行时。先执行 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`，再运行 `make PLATFORM=ascend test`；测试、性能对照及 msprof / mssanitizer 说明见 [昇腾报告](REPORT_ASCEND.md)。
-
 题目 2，训练营 ID：曹泽阳；提交目录：`zmuxuny`。默认程序为纯 CUDA 软件实现，编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
+
+[总结报告](REPORT.md) 汇总功能、正确性、性能及平台结论；[工具分析](PROFILING.md) 给出 Profiler / Sanitizer 证据；[提交要求对应表](SUBMISSION.md) 列出交付内容。
 
 ## 构建与运行
 
@@ -41,6 +27,22 @@ python3 tests/benchmark.py
 `make test` 运行较短的参数组合测试；完整 `validate.py` 还覆盖所有 FP8 有限码值、FP4 码值、舍入中点及其两侧、零值、大动态范围、奇数列、尾块和文件错误。测试与正式程序分目录存放。
 
 切换目标架构时先 `make clean`，再例如 `make ARCH=86`。默认 `sm_75` 二进制及 PTX 已在 RTX 3060 上运行；这证明编译路径不依赖 Ampere 指令，T4 的实际运行性能仍需在 T4 上测量。
+
+## 平台构建与实验
+
+| 平台 | 构建 | 二进制目录 | 实测与分析 |
+|---|---|---|---|
+| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_TUNING.md)、[3060 首版归档](REPORT_3060_INITIAL.md) |
+| MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
+| Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
+| Moore Threads MTT S4000 | `make PLATFORM=musa` | `build/musa/` | [S4000 报告](REPORT_MUSA.md) |
+| Ascend 910B2 | `make PLATFORM=ascend` | `build/ascend/` | [昇腾报告](REPORT_ASCEND.md) |
+
+天数实测 CoreX 4.4.0，默认 `COREX_PATH=/usr/local/corex`、`IVCORE_ARCH=ivcore11`；使用 CoreX clang 编译，运行前设置 `LD_LIBRARY_PATH=$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}`。`make PLATFORM=iluvatar test` 包含数值验证和 49,152 项随机哈希一致性检查。复现性能、Profiler 和 Sanitizer 的命令见对应平台报告。
+
+摩尔线程实测 MUSA 4.3.6 / `mp_22`，默认 `MUSA_PATH=/usr/local/musa`；运行前设置 `MUSA_VISIBLE_DEVICES=0` 和 `LD_LIBRARY_PATH=$MUSA_PATH/lib:${LD_LIBRARY_PATH:-}`。完整数值验证、参数扫描及工具采样命令见 [S4000 报告](REPORT_MUSA.md)。
+
+昇腾实测 ARM64 / CANN 9.0 / 910B2，使用 Ascend C 独立内核和 ACL 运行时。先执行 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`，再运行 `make PLATFORM=ascend test`；测试、性能对照及 msprof / mssanitizer 说明见 [昇腾报告](REPORT_ASCEND.md)。
 
 ## 配置语义
 
@@ -106,7 +108,7 @@ BF16 以 16 位原始位模式存储，使用整数实现 RNE 转换，在 `sm_7
 
 实测结果及分析见 [REPORT.md](REPORT.md)，原始数据见 [results/](results/)。
 
-工具检查脚本为 `tests/profile.py`，可用 `--ncu`、`--sanitizer` 指定可用工具路径；仅检查本题。本机 WSL 的 profiler / 调试接口限制及失败日志单独记录，不计作检查通过。报告和图表通过 `python3 tests/report.py` 从本题 JSON 重建，额外依赖 Matplotlib。
+工具检查脚本为 `tests/profile.py`，可用 `--ncu`、`--sanitizer` 指定可用工具路径；仅检查本题。本机 WSL 的 profiler / 调试接口限制及失败日志单独记录，不计作检查通过。`python3 tests/report.py` 仅从首版 JSON 重建 `REPORT_3060_INITIAL.md` 与图，额外依赖 Matplotlib；不会覆盖当前总结报告。
 
 原生 Linux 分析结果及本机 WSL 设置说明见 [PROFILING.md](PROFILING.md)。
 
@@ -123,9 +125,9 @@ python3 tests/report_4090.py
 
 大张量前后交替比较可用 `tests/benchmark_extended.py --before /path/to/old/quantize --after build/quantize`。`tests/report.py` 对应首版数据；`tests/report_4090.py` 使用独立归档的 4090 D 结果。
 
-## 第二轮调优与可选硬件转换
+## 软件优化与可选硬件转换
 
-NVIDIA 后端量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [第二轮报告](REPORT_TUNING.md)。
+NVIDIA 后端量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [4090 D 实验报告](REPORT_TUNING.md)。
 
 额外的 Ada FP8 转换对照使用独立可执行文件，不改变默认程序；需要 CUDA >=12.1 和 `sm_89` 或更新：
 

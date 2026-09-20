@@ -1,4 +1,4 @@
-"""Rebuild this project report and plots from experimental JSON."""
+"""Rebuild the initial RTX 3060 experiment archive and plot from its JSON."""
 
 import json
 from pathlib import Path
@@ -168,7 +168,7 @@ def main():
                     f"{m['dequant_effective_gbps']:.2f}",
                 ]
             )
-    qdoc = f"""# 题目 2 总结报告：MXFP8 / NVFP4 软件量化与反量化
+    qdoc = f"""# 题目 2 首版实验归档：MXFP8 / NVFP4 软件量化与反量化
 
 作者：zmuxuny
 
@@ -236,10 +236,10 @@ GPU 含传输时间覆盖 H2D 输入、量化和反量化、D2H 重建输出。p
     title, rest = qdoc.split("\n", 1)
     qdoc = (
         title
-        + "\n\n> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前优化实现、4090 D 同机前后对比和工具检查见 [RTX 4090 D 优化报告](REPORT_4090D.md)。\n"
+        + "\n\n> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前实现与结论见 [总结报告](REPORT.md)；本文中的“当前”“下一步”均指首版实验时点。\n"
         + rest
     )
-    (Q / "REPORT.md").write_text(qdoc)
+    (Q / "REPORT_3060_INITIAL.md").write_text(qdoc)
 
 
 if __name__ == "__main__":

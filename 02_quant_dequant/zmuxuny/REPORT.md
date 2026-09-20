@@ -1,92 +1,94 @@
 # 题目 2 总结报告：MXFP8 / NVFP4 软件量化与反量化
 
-> 本文保留首版 RTX 3060 Laptop 实验与实现说明。当前优化实现、4090 D 同机前后对比和工具检查见 [RTX 4090 D 优化报告](REPORT_4090D.md)。
+训练营 ID：**曹泽阳**；GitHub ID：`zmuxuny`。
 
-作者：zmuxuny
+本程序完成“读取 FP32/FP16 → 软件量化与真实位宽打包 → 保存数据及缩放 → 独立反量化”的流程。默认 CUDA 程序不依赖原生 FP8/FP4 指令，另提供 Ada 原生 E4M3 转换对照。除 NVIDIA 外，提供 MACA、CoreX、MUSA 和 Ascend C 后端。
 
-## 完成结果
+## 功能与验证依据
 
-本项目在常规 CUDA GPU 上实现从 FP32/FP16 输入到低精度文件，再到 FP16/BF16/FP32 输出的完整流程。两种格式均支持真实 bit 宽度存储、块级与张量级缩放、最近偶数舍入与可复现随机舍入，并提供独立文件重载反量化。
+| 题目要求 | 实现与证据 |
+|---|---|
+| 两种输入、三种反量化输出 | FP32/FP16 输入，FP16/BF16/FP32 输出；[配置与 CLI](README.md) |
+| 两种格式、block/tensor 缩放、nearest/stochastic | 独立 NumPy 显式码本验证 packed 数据、缩放及反量化值；[测试实现](tests/validate.py) |
+| FP4 每字节两个元素、持久化后独立加载 | 偶数列在低半字节、奇数列在高半字节；文件保存形状、格式、scales 和 global scale；[协议](README.md#二进制文件协议-v1) |
+| 分布误差、压缩率、耗时与有效带宽 | 下文给出统一配置的结果；[全部 24 组分布与缩放实验](results/4090d/tuning/benchmark_modes.json) |
+| 普通 CUDA 软件实现 | 默认 `make` 目标为 sm_75；已在 RTX 3060 运行。`make native ARCH=89` 是独立可选程序 |
 
-实测日期：2026-09-19。GPU：RTX 3060 Laptop 6 GiB（sm_86）；CPU：Ryzen 7 6800H，WSL 分配 8 个逻辑 CPU；系统：Ubuntu / WSL2；CUDA Toolkit 11.5、GCC 10.5、驱动 576.80。编译目标为 sm_75 + compute_75 PTX，使用 `-O3 --fmad=false -lineinfo`，未启用 fast-math。完整环境记录见 `results/environment.json`。
+当前计算实现的 Ascend 与 RTX 3060 回归各通过 **182 组数值测试及 3 组非法文件检查**。测试包括有限码值、舍入中点及相邻 ULP、次正规数、负零、尾块、奇数列、自定义块长、随机舍入和文件重载。主程序的 C++ CPU 参考逐字节校验之外，再以不同编码算法的 NumPy 码本搜索交叉验证。日志见下文平台表。
 
-## 格式、缩放与文件协议
+## 数值定义与实现
 
-MXFP8 使用 E4M3 元素和 E8M0 缩放。默认每行每 32 个元素组成一个块，`s=2^ceil(log2(amax/448))`，指数裁剪至 [-127,127]，全零块取 s=1。量化为 `E4M3_RNE/SR(x/s)`，反量化为 `decode(q)*s`。标准格式与缩放策略依据 [NVIDIA MXFP8 文档](https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/mxfp8/mxfp8.html)。
+MXFP8 使用 E4M3 元素（最大幅值 448）和 E8M0 块缩放，默认块长 32。对块最大幅值 `a`，取 `e=clamp(ceil(log2(a/448)), -127, 127)`，保存 `e+127`；重建为 `decode_E4M3(q) * 2^e`。全零块取缩放 1。
 
-NVFP4 使用 E2M1 四位元素、默认每 16 个元素共享的 E4M3 局部 scale，以及 FP32 全局 scale。`g=global_amax/(448*6)`，`s=E4M3_RNE((block_amax/g)/6)`；量化为 `E2M1_RNE/SR((x/g)/decode(s))`，反量化为 `(decode(q)*decode(s))*g`。依据 [NVIDIA NVFP4 文档](https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/nvfp4/nvfp4.html)。全零张量 g=1；极小 g 下限取 FP32 最小正规值；局部 scale 舍入为零时输出零码。
+NVFP4 使用 E2M1 元素，正幅值码本为 `{0, 0.5, 1, 1.5, 2, 3, 4, 6}`；默认 16 个元素共用 E4M3 局部缩放。全局缩放 `g=global_amax/(448*6)`，局部缩放 `s=E4M3_RNE((block_amax/g)/6)`，重建为 `(decode_E2M1(q)*decode_E4M3(s))*g`。全零张量取 `g=1`；极小 `g` 下限为 FP32 最小正规数，局部缩放为零的块输出零码。
 
-NVFP4 偶数列占低半字节、奇数列占高半字节，每个输出线程独占一个字节，避免 packed store 竞争。奇数列末尾补一个零半字节。scale 数组按行主序排列，块不跨行。FP8 元素负零保留符号，最近舍入采用 ties-to-even；随机舍入按相邻值距离选择，seed 与全局元素索引决定随机数，与 CUDA launch 排布无关。
+元素可选最近偶数或按相邻码值距离的随机舍入，缩放采用确定性计算。FP4 的一个写线程拥有一个完整字节，避免两个半字节并发更新；奇数列行末高半字节填零，块不跨行。非默认块长及 per-tensor 模式是题目要求的扩展对照，文件为软件交换布局。格式依据和全部字段见 [README](README.md#数值与布局)。
 
-输入输出文件有 32 字节版本化 header，packed 文件有 56 字节 header，后接一字节 scale 数组和 packed data。字段定义、解析脚本、异常输入策略见 [README](README.md)。非默认块尺寸和 per-tensor 模式属于对照扩展；交换格式不含硬件 GEMM 的 swizzle。
+CUDA 常用对齐路径把局部 amax、缩放和编码融合，减少输入重读与 kernel 启动；向量化访问减少访存指令。NVFP4 仍需先做全局 amax，该步骤计入量化耗时。奇数列、尾块和自定义块长走通用路径。软件 E4M3 使用整数位域舍入，Ada 对照仅替换 E4M3 最近偶数转换，不改变 E2M1 软件编码。
 
-## CUDA 实现与优化
+国产 GPU 按 wave 宽度与访存特征配置归约和打包；Ascend C 使用 UB 分块搬运与向量 amax。各平台的数值兼容处理及参数扫描在对应报告中说明。代码入口为 [主程序](src/main.cu)、[数值编码](include/numeric.cuh)、[GPU 分派](include/gpu.cuh)、[向量内核](include/vector.cuh) 和 [Ascend 内核](ascend/kernels.cpp)。
 
-1. 全局 amax 在设备端分层计算：线程分段遍历、warp 最大值归约、每 warp 一次无符号原子最大值。仅 NVFP4 或 per-tensor 模式需要这一遍。
-2. 局部缩放由一个 warp 处理一个量化块，一 CTA 处理 8 个块；尾块只读取有效元素。MXFP8 block 模式不需要张量级同步。
-3. FP8 编码用指数分解和尾数舍入代替遍历码本；FP4 编码使用分段索引。FP4 由一线程编码两个元素并写一个 packed byte，反量化按位提取。
-4. FP32 计算、FP16/BF16 存储转换分离，BF16 使用整数舍入，不引入原生 BF16 指令依赖。RAII 设备缓冲区在重复测量期间复用。
+## 误差与压缩率
 
-独立测试发现，若先将浮点尾数位置加上整数指数偏移，再执行舍入，会抹掉中点上方一个 ULP，从而错误选择相邻 FP8 码。最终实现先舍入尾数、再组合指数。测试专门覆盖所有有限 FP8 码、中点及其 `nextafter` 两侧；这一修正也同步用于题目 3。
+以下来自 RTX 4090 D 软件版归档：1024×1024，FP32 输入/输出，默认块长，block 缩放，nearest，seed=42。uniform 为 U(-1,1)，normal 为 N(0,1)，outliers 将正态样本中概率 0.001 的元素乘以 50。
 
-## 正确性
+| 分布 | 格式 | 最大绝对误差 | MAE | MSE |
+|---|---|---|---|---|
+| uniform | mxfp8 | 0.0312499 | 0.01042 | 0.000186177 |
+| uniform | nvfp4 | 0.166662 | 0.0443061 | 0.00344867 |
+| normal | mxfp8 | 0.24472 | 0.0179733 | 0.000706241 |
+| normal | nvfp4 | 0.587548 | 0.0714274 | 0.00904878 |
+| outliers | mxfp8 | 7.44952 | 0.0188316 | 0.00236072 |
+| outliers | nvfp4 | 8.87808 | 0.0796653 | 0.0191312 |
 
-独立 NumPy oracle 通过显式码本搜索编码，CUDA 通过指数/分段算法编码。完整验证通过 **151** 组参数与边界测试，以及 3 组无效文件测试。覆盖 FP32/FP16 输入、三种输出类型、两种格式、两种缩放模式、两种舍入、零值、极端动态范围、奇数列、尾块及多种块大小。每组比较 packed data、scale、global scale、反量化输出和误差指标；另验证从持久化文件单独加载反量化。结果见 [correctness.json](results/correctness.json)。
+NVFP4 用更少数据位换取更大误差。异常值下，NVFP4 的 block MSE 为 0.0191312，tensor MSE 为 1.03266；块缩放把异常值对精度的影响限制在局部。MXFP8 在这组数据的两种缩放模式下 MSE 相同，不能将 NVFP4 的改善幅度外推到 MXFP8。
 
-## 实验结果
+压缩率按原始张量字节数除以存储字节数计算；payload 包含局部 scales 与 FP32 全局缩放，完整文件另计 header。相同形状的存储结果如下：
 
-每个配置 3 次独立进程运行，每次预热 3 次、CUDA event 计时 100 次，表中列出各指标的三次运行中位数。加速比先在每次运行中计算，再取中位数，因此未必等于表中两个时间中位数之比。使用默认 stream、常驻设备缓冲区；GPU 时钟未锁定，桌面与 WSL 调度会影响短 kernel。CPU 为本项目单线程参考；传输计时不含文件 I/O、分配、参考验证和写盘。
-
-输入形状统一为 1024×1024。uniform 为 U(-1,1)，normal 为 N(0,1)，outliers 为标准正态中按概率 0.001 选中元素并乘 50；固定 seed=42。下表为 FP32 输入、FP32 输出、默认块大小、nearest 舍入。
-
-| 分布 | 格式 | 量化 ms | 反量化 ms | 最大绝对误差 | MAE | MSE |
-| --- | --- | --- | --- | --- | --- | --- |
-| uniform | mxfp8 | 0.0880 | 0.0543 | 0.0312499 | 0.01042 | 0.000186177 |
-| uniform | nvfp4 | 0.1548 | 0.0403 | 0.166662 | 0.0443061 | 0.00344867 |
-| normal | mxfp8 | 0.0827 | 0.0436 | 0.24472 | 0.0179733 | 0.000706241 |
-| normal | nvfp4 | 0.1529 | 0.0408 | 0.587548 | 0.0714274 | 0.00904878 |
-| outliers | mxfp8 | 0.0912 | 0.0478 | 7.44952 | 0.0188316 | 0.00236072 |
-| outliers | nvfp4 | 0.1791 | 0.0480 | 8.87808 | 0.0796653 | 0.0191312 |
-
-![量化延迟与误差](results/summary.png)
-
-实际压缩率将局部 scales 和 FP32 全局 scale 计入 payload：
-
-| 输入 | 格式 | 数据 bytes | scale bytes | payload 压缩率 | 完整文件压缩率 |
-| --- | --- | --- | --- | --- | --- |
+| 输入 | 格式 | packed data bytes | scale bytes | payload 压缩率 | 文件压缩率 |
+|---|---|---|---|---|---|
 | fp32 | mxfp8 | 1048576 | 32768 | 3.8788× | 3.8786× |
 | fp32 | nvfp4 | 524288 | 65536 | 7.1111× | 7.1105× |
 | fp16 | mxfp8 | 1048576 | 32768 | 1.9394× | 1.9393× |
 | fp16 | nvfp4 | 524288 | 65536 | 3.5555× | 3.5553× |
 
-块缩放与全张量缩放的误差对比：
+## 性能与分析
 
-| 分布 | 格式 | block MSE | tensor MSE | tensor/block |
-| --- | --- | --- | --- | --- |
-| normal | mxfp8 | 0.000706241 | 0.000706241 | 1.00× |
-| normal | nvfp4 | 0.00904878 | 0.0183431 | 2.03× |
-| outliers | mxfp8 | 0.00236072 | 0.00236072 | 1.00× |
-| outliers | nvfp4 | 0.0191312 | 1.03266 | 53.98× |
+### 同功能 CPU 对照
 
-局部缩放将异常值影响限定在一个块；全张量缩放则让单个大值影响全部元素的分辨率。这一差异在异常值分布中尤其明显。
+下表使用上述正态输入。每项 3 个独立进程，预热 3 次、重复 100 次，分别取指标中位数。CPU 为本项目单线程 scalar 量化加反量化；GPU 含传输覆盖输入 H2D、量化、反量化和重建输出 D2H，排除分配、文件 I/O、验证与另行下载 packed 文件。它是项目参考实现对照，不代表优化 CPU 库的上限。
 
-标准正态输入下，与同功能单线程 CPU 量化加反量化比较：
+| 格式 | 量化 ms | 反量化 ms | 量化 / 反量化有效 GB/s | CPU ms | GPU 含传输 ms |
+|---|---|---|---|---|---|
+| mxfp8 | 0.003379 | 0.003511 | 1561.2 / 1502.5 | 18.273 | 0.803 |
+| nvfp4 | 0.008315 | 0.003512 | 575.4 / 1362.1 | 58.411 | 0.814 |
 
-| 格式 | CPU ms | GPU 含传输 ms | 加速比 | 量化有效 GB/s | 反量化有效 GB/s |
-| --- | --- | --- | --- | --- | --- |
-| mxfp8 | 57.952 | 1.536 | 37.56× | 63.81 | 120.91 |
-| nvfp4 | 77.491 | 1.309 | 59.22× | 31.29 | 117.21 |
+有效 GB/s 按逻辑输入、输出与 scales 计算。此输入可被缓存，逻辑带宽不等于 DRAM 实测带宽；不能据此宣称达到硬件带宽上限。量化与反量化事件计时仅包含对应设备流程，与含传输时间分开报告。
 
-GPU 含传输时间覆盖 H2D 输入、量化和反量化、D2H 重建输出。packed 文件写出及其独立 D2H 下载在测量外。所有性能日志均来自实际运行，完整的 FP16 输入、tensor 模式和三次试验数据见 [benchmark.json](results/benchmark.json)。CPU 基准未做 SIMD/多线程优化，比较对象是项目参考实现。
+### 大尺寸量化调优
 
-## 工具检查与后续优化
+FP16 输入 65536×1024（128 MiB）、NVFP4、默认 block、nearest，反量化输出 FP32。各行在同一设备交替执行基线和优化版，各 3 次独立试验，取完整量化设备事件时间中位数（含全局 amax），不含主机传输。
 
-已尝试新版 Compute Sanitizer 2025.2.1（CUDA 12.9 配套），但 Windows 侧 WDDM 调试接口未启用，工具要求管理员运行 EnableDebuggerInterface.bat，并在 kernel 检查前退出。此次未取得 sanitizer 检查通过结果。原始命令和输出保存在 `results/{memcheck,racecheck,synccheck}.txt`。
+| 平台 | 基线 ms | 优化后 ms | 基线 / 优化后 |
+|---|---|---|---|
+| RTX 4090 D | 0.75206 | 0.33219 | 2.26× |
+| C500 | 0.75722 | 0.60595 | 1.25× |
+| MR-V100 | 1.08742 | 0.81770 | 1.33× |
+| S4000 | 36.03870 | 2.93358 | 12.28× |
+| Ascend 910B2 | 307.11759 | 102.37211 | 3.00× |
 
-当前 Nsight Compute 2021.3.1 在设备检查阶段明确报告不支持本机 WSL，未取得硬件计数器数据。`results/ncu.txt` 保留原始错误；本文带宽是逻辑字节数除以 CUDA event 时间，不据此宣称达到某个 DRAM 利用率。可在支持的分析环境运行 `python3 tests/profile.py --ncu /path/to/ncu --sanitizer /path/to/compute-sanitizer` 重现。
+4090 D 基线为 `1f259ef`，其余为各平台正确性通过的初始移植；这些比值衡量同机调优收益。S4000 的较大收益主要来自保留舍入语义的除法优化，不能解释为平台间算力差异。小输入更受启动开销影响，并非全部配置获益：例如 Ascend FP16 32×1024 MXFP8 由 0.05729 ms 变为 0.06907 ms。全部尺寸、反量化结果、候选取舍及逐次测量见平台报告。
 
-下一步可对固定默认块布局专门化地址计算，将局部 scale 计算和量化写出融合以减少输入重读；目前为了支持任意行尾和多种块大小，使用通用索引。国产平台尚未实现；本次没有使用原生 FP8/FP4 硬件路径或第三方量化库。
+## 平台实验与复现
 
-## 复现与提交
+| 平台 | 实现与实验报告 | 正确性记录 |
+|---|---|---|
+| NVIDIA RTX 4090 D | [软件与 Ada 原生转换对照](REPORT_TUNING.md) | [软件](results/4090d/tuning/correctness.json)、[原生](results/4090d/tuning/correctness_native.json) |
+| MetaX C500 | [MACA 实现](REPORT_C500.md) | [测试结果](results/c500/correctness.json) |
+| Iluvatar MR-V100 | [CoreX 实现](REPORT_ILUVATAR.md) | [测试结果](results/iluvatar/correctness.json) |
+| Moore Threads S4000 | [MUSA 实现](REPORT_MUSA.md) | [测试结果](results/musa/correctness.json) |
+| Ascend 910B2 | [Ascend C 实现](REPORT_ASCEND.md) | [测试结果](results/ascend/correctness.json) |
 
-`make && python3 tests/validate.py && python3 tests/benchmark.py` 可重建测试和计时数据；`python3 tests/report.py` 从本题的 JSON 重建报告与图。代码位于上游 `2026-summer-project` 基础上的 `02_quant_dequant/zmuxuny/`，可独立提交。
+当前计算实现最后在 Ascend 910B2 与 [RTX 3060](results/ascend/correctness_nvidia_regression.json) 完成完整回归。其他平台的实测对应各平台报告所记录的源码和二进制版本；后续公共代码改动未在已归还的设备上重新测试。各性能表描述其归档版本，不把历史实测视为当前提交在所有设备上的重测。
+
+构建、最小文件往返与完整测试命令见 [README](README.md)。[Profiler 分析](PROFILING.md) 给出时间线、硬件计数器及工具检查范围；ncu/nsys 分析为题目加分项。首版 RTX 3060 实验保留于 [独立归档](REPORT_3060_INITIAL.md)，不作为当前实现说明。

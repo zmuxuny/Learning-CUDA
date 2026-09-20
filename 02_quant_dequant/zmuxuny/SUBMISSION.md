@@ -1,19 +1,34 @@
 # 题目 2 提交说明
 
-本题独立提交；文档未强制要求每题单独 PR，这样拆分便于逐题评审。基于上游 `2026-summer-project`，仅新增 `02_quant_dequant/zmuxuny/`，不依赖另一题 PR 的合并顺序。
+训练营 ID：**曹泽阳**；GitHub ID / 目录名：`zmuxuny`。
 
-- fork：`zmuxuny/Learning-CUDA`
-- head：`projects/quant-dequant`
-- base：`InfiniTensor/Learning-CUDA:2026-summer-project`
-- 标题：`【训练营】【题目2】MXFP8/NVFP4 软件量化与反量化（多平台）`
+| 提交项 | 本题内容 |
+|---|---|
+| fork | [zmuxuny/Learning-CUDA](https://github.com/zmuxuny/Learning-CUDA) |
+| 上游目标 | `InfiniTensor/Learning-CUDA:2026-summer-project` |
+| PR 分支 | `projects/quant-dequant` |
+| 目录 | `02_quant_dequant/zmuxuny/`，可独立构建，不依赖另一题 PR |
+| PR | [#80](https://github.com/InfiniTensor/Learning-CUDA/pull/80) |
+| 标题 | `【训练营】【题目2】MXFP8/NVFP4 软件量化与反量化（多平台）` |
+| 总结报告 | [REPORT.md](REPORT.md) |
+| 使用与测试 | [README.md](README.md)；`tests/` |
 
-本题目录内运行：
+## 要求与材料对应
 
-```bash
-make
-python3 tests/validate.py
-python3 tests/benchmark.py
-python3 tests/report.py
-```
+依据《2026夏季训练营 CUDA 方向项目》开头“项目代码要求”及题目 2“需提交内容”：
 
-提交后官网若要求 fork、commit 链接，使用本题分支及对应 commit。PR 正文见 `PR_BODY.md`。旧的合并开发分支 `projects/quant-hadamard` 仅用于本地集成，不作为本题 PR 的 head。
+| 要求 | 对应内容 |
+|---|---|
+| FP32/FP16 输入与 FP16/BF16/FP32 输出 | README 配置表、文件协议、独立重载示例 |
+| MXFP8/NVFP4、真实位宽打包、缩放与舍入 | REPORT 数值定义；include/；tests/validate.py |
+| 分布误差、压缩率、kernel 时间、有效带宽 | REPORT 误差与性能表；results/ 各平台原始 JSON |
+| NVIDIA 必需、国产适配加分 | REPORT 平台表及对应平台实验报告 |
+| ncu 和/或 nsys 使用与分析加分 | PROFILING.md 与原始日志；Sanitizer 未列为必需项 |
+
+开头通用说明的“无测试代码”与题目专门条款的“包含测试”存在文字冲突；本提交按题目专门条款保留 `tests/`，正式程序位于 `src/`、`include/`、`ascend/`。题目没有强制每题单独 PR，本提交分开以便独立评审。
+
+## 官网提交
+
+文档还说明在官网提交 fork 仓库链接与 commit 链接。GitHub PR 与官网提交是两项操作；本仓库无法确认官网登记状态。官网应填写本题 fork 和 PR head 对应的提交链接，提交哈希可从 PR 的 Commits 页复制。
+
+`PR_BODY.md` 为完整 PR 正文。`REPORT_3060_INITIAL.md` 是首版实验归档；`tests/report.py` 只重建该归档，不覆盖当前总结报告。
