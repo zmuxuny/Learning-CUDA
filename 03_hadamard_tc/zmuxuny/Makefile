@@ -1,5 +1,7 @@
 PLATFORM ?= nvidia
 MACA_PATH ?= /opt/maca
+COREX_PATH ?= /usr/local/corex
+IVCORE_ARCH ?= ivcore11
 NVCC ?= nvcc
 HOSTCXX ?= $(shell command -v g++-10 2>/dev/null || command -v g++)
 ARCH ?= 75
@@ -12,31 +14,46 @@ CXXFLAGS := -std=c++17 -O3 --fmad=false -I$(MACA_PATH)/tools/cu-bridge/include
 BUILD_DIR := build/metax
 RUN_ENV := LD_LIBRARY_PATH=$(MACA_PATH)/lib:$${LD_LIBRARY_PATH:-}
 TEST_OUTPUT := results/c500/correctness.json
+else ifeq ($(PLATFORM),iluvatar)
+# CoreX clang targets the device ISA directly; its bundled nvcc is not used.
+NVCC := $(COREX_PATH)/bin/clang++
+CXXFLAGS := -x ivcore --cuda-gpu-arch=$(IVCORE_ARCH) -std=c++17 -O3 -ffp-contract=off
+LDLIBS := -L$(COREX_PATH)/lib64 -lcudart
+BUILD_DIR := build/iluvatar
+RUN_ENV := LD_LIBRARY_PATH=$(COREX_PATH)/lib64:$${LD_LIBRARY_PATH:-}
+TEST_OUTPUT := results/iluvatar/correctness.json
 else ifeq ($(PLATFORM),nvidia)
 BUILD_DIR := build
 TEST_OUTPUT := results/correctness.json
 else
-$(error Unsupported PLATFORM '$(PLATFORM)' (expected nvidia or metax))
+$(error Unsupported PLATFORM '$(PLATFORM)' (expected nvidia, metax or iluvatar))
 endif
 
-.PHONY: all test clean native
+.PHONY: all test numeric-test clean native
 all: $(BUILD_DIR)/hadamard
-$(BUILD_DIR)/hadamard: src/main.cu src/hadamard.cuh src/tensor_core.cuh src/metax_matrix.cuh $(wildcard include/*) Makefile
+$(BUILD_DIR)/hadamard: src/main.cu src/hadamard.cuh src/tensor_core.cuh src/metax_matrix.cuh src/iluvatar_matrix.cuh $(wildcard include/*) Makefile
 	mkdir -p $(BUILD_DIR)
-	$(NVCC) $(CXXFLAGS) $< -o $@
-test: all
+	$(NVCC) $(CXXFLAGS) $< -o $@ $(LDLIBS)
+test: all numeric-test
 	mkdir -p $(dir $(TEST_OUTPUT))
 	$(RUN_ENV) python3 tests/validate.py --binary $(BUILD_DIR)/hadamard --output $(TEST_OUTPUT)
 clean:
 	rm -rf $(BUILD_DIR)
 
 # Explicit bonus target; the default binary always uses software FP8 encoding.
-ifeq ($(PLATFORM),metax)
+ifneq ($(PLATFORM),nvidia)
 native:
-	$(error The native target uses NVIDIA FP8 instructions; run make PLATFORM=metax instead)
+	$(error The native target uses NVIDIA FP8 instructions; use the default target for this platform)
 else
 native: $(BUILD_DIR)/hadamard_native
-$(BUILD_DIR)/hadamard_native: src/main.cu src/hadamard.cuh src/tensor_core.cuh src/metax_matrix.cuh $(wildcard include/*) Makefile
+$(BUILD_DIR)/hadamard_native: src/main.cu src/hadamard.cuh src/tensor_core.cuh src/metax_matrix.cuh src/iluvatar_matrix.cuh $(wildcard include/*) Makefile
 	mkdir -p $(BUILD_DIR)
-	$(NVCC) $(CXXFLAGS) -DLP_NATIVE_FP8=1 $< -o $@
+	$(NVCC) $(CXXFLAGS) -DLP_NATIVE_FP8=1 $< -o $@ $(LDLIBS)
 endif
+
+# Check lane-dependent RNG separately so launch-layout regressions are explicit.
+$(BUILD_DIR)/validate_numeric: tests/validate_numeric.cu $(wildcard include/*) Makefile
+	mkdir -p $(BUILD_DIR)
+	$(NVCC) $(CXXFLAGS) $< -o $@ $(LDLIBS)
+numeric-test: $(BUILD_DIR)/validate_numeric
+	$(RUN_ENV) $(BUILD_DIR)/validate_numeric

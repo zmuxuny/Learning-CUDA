@@ -7,11 +7,13 @@
 
 #if defined(__MACACC__)
 #include "metax_matrix.cuh"
+#elif defined(__ILUVATAR__)
+#include "iluvatar_matrix.cuh"
 #endif
 
 namespace lp {
-#if defined(__MACACC__) || LP_CUDA_ARCH >= 80
-#if !defined(__MACACC__)
+#if defined(__MACACC__) || defined(__ILUVATAR__) || LP_CUDA_ARCH >= 80
+#if !defined(__MACACC__) && !defined(__ILUVATAR__)
 // Documented PTX m16n8k16 fragment layout, not an opaque WMMA layout assumption.
 // Two MMA instructions transform 16 independent 16-element segments. Remaining
 // Hadamard factors act on the segment index using shuffles and FP32 registers.
@@ -217,7 +219,7 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
 }
 
 #endif // NVIDIA-specific fragment implementation
-#if defined(__MACACC__)
+#if defined(__MACACC__) || defined(__ILUVATAR__)
 constexpr int MMA_LANES = 64;
 #else
 constexpr int MMA_LANES = 32;
@@ -228,13 +230,29 @@ inline void launch_had_mma_type(const void *x, void *y, size_t rows, int d, bool
                                 bool signs, uint32_t seed, uint8_t *data,
                                 uint8_t *scales, float *amax, Layout p) {
   size_t n = rows * d;
-#define MMA_CASE(D)                                                                    \
-  case D:                                                                              \
-    hadamard_mma_kernel<D, TYPE, MODE, FMT>                                            \
-        <<<(n + 4 * (D > 256 ? D : 256) - 1) / (4 * (D > 256 ? D : 256)), 4 * MMA_LANES>>>(      \
-            static_cast<const uint16_t *>(x), static_cast<uint16_t *>(y), n, norm,     \
-            signs, seed, data, scales, amax, p);                                       \
+#if defined(__ILUVATAR__)
+  // One wave per CTA improves large MXFP8 fusion; retain four for the
+  // bandwidth-bound standalone transform and the NVFP4 reduction pipeline.
+#define MMA_CASE(D)                                                             \
+  case D: {                                                                     \
+    constexpr int W = MODE == 2 && FMT == MXFP8 && D >= 256 ? 1 : 4;            \
+    constexpr int ITEMS = D > 256 ? D : 256;                                    \
+    hadamard_mma_kernel<D, TYPE, MODE, FMT, W>                                   \
+        <<<(n + W * ITEMS - 1) / (W * ITEMS), W * MMA_LANES>>>(                  \
+            static_cast<const uint16_t *>(x), static_cast<uint16_t *>(y), n,    \
+            norm, signs, seed, data, scales, amax, p);                           \
+    break;                                                                      \
+  }
+#else
+#define MMA_CASE(D)                                                             \
+  case D:                                                                       \
+    hadamard_mma_kernel<D, TYPE, MODE, FMT>                                      \
+        <<<(n + 4 * (D > 256 ? D : 256) - 1) / (4 * (D > 256 ? D : 256)),        \
+           4 * MMA_LANES>>>(                                                    \
+            static_cast<const uint16_t *>(x), static_cast<uint16_t *>(y), n,    \
+            norm, signs, seed, data, scales, amax, p);                           \
     break
+#endif
   switch (d) {
     MMA_CASE(16);
     MMA_CASE(32);

@@ -1,6 +1,9 @@
 #pragma once
 #include "../include/gpu.cuh"
 #include <mma.h>
+#if defined(__ILUVATAR__)
+#include "iluvatar_matrix.cuh"
+#endif
 
 namespace lp {
 #if defined(__MACACC__)
@@ -8,18 +11,18 @@ constexpr int BUTTERFLY_LANES = 64;
 #else
 constexpr int BUTTERFLY_LANES = 32;
 #endif
-// One native wave transforms one row. XOR butterflies stay in registers: the first
-// log2(wave size) stages exchange lanes; remaining stages exchange registers.
-template <int D, int MODE, int FMT>
+// One logical group of W lanes transforms a row. XOR butterflies stay in
+// registers: log2(W) stages exchange lanes; remaining stages exchange registers.
+template <int D, int MODE, int FMT, int WARPS = 4,
+          int W = (D <= 128 ? 32 : BUTTERFLY_LANES)>
 __global__ void hadamard_kernel(const void *x, void *y, size_t rows, int dtype,
                                 bool normalize, bool random_sign, uint32_t sign_seed,
                                 uint8_t *data, uint8_t *scales, float *amax, Layout p) {
   // Small dimensions favor two logical 32-lane rows per C500 wave;
   // larger rows benefit from all 64 lanes and fewer values per thread.
-  constexpr int W = D <= 128 ? 32 : BUTTERFLY_LANES;
   constexpr int V = (D + W - 1) / W;
   int lane = threadIdx.x % W;
-  size_t row = size_t(blockIdx.x) * 4 + threadIdx.x / W;
+  size_t row = size_t(blockIdx.x) * WARPS + threadIdx.x / W;
   if (row >= rows && MODE != 1)
     return;
   float v[V];
@@ -63,12 +66,12 @@ __global__ void hadamard_kernel(const void *x, void *y, size_t rows, int dtype,
       if (j * W + lane < D)
         m = fmaxf(m, fabsf(v[j]));
     m = warp_max(m, W);
-    __shared__ float maxima[4];
+    __shared__ float maxima[WARPS];
     if (lane == 0)
       maxima[threadIdx.x / W] = m;
     __syncthreads();
     if (threadIdx.x < 32) {
-      m = warp_max(lane < 4 ? maxima[lane] : 0.0f);
+      m = warp_max(lane < WARPS ? maxima[lane] : 0.0f);
       if (lane == 0)
         atomicMax(reinterpret_cast<unsigned *>(amax), __float_as_uint(m));
     }
@@ -113,11 +116,26 @@ template <int MODE, int FMT>
 inline void launch_had_format(const void *x, void *y, size_t rows, int d, int dtype,
                               bool norm, bool signs, uint32_t seed, uint8_t *data,
                               uint8_t *scales, float *amax, Layout p) {
-#define HAD_CASE(D)                                                                    \
-  case D:                                                                              \
-    hadamard_kernel<D, MODE, FMT><<<(rows + 3) / 4, 4 * (D <= 128 ? 32 : BUTTERFLY_LANES)>>>(                            \
-        x, y, rows, dtype, norm, signs, seed, data, scales, amax, p);                  \
+#if defined(__ILUVATAR__)
+  // Native 64-lane rows reduce register pressure for D>=128. The amax
+  // prepass uses more rows per CTA to reduce atomic contention; D=1024
+  // benefits from two waves per CTA in the transform/output stages.
+#define HAD_CASE(D)                                                             \
+  case D: {                                                                     \
+    constexpr int W = (MODE == 1 && D <= 128) || D < 128 ? 32 : 64;              \
+    constexpr int R = MODE == 1 ? 16 : (D >= 512 ? 2 : 4);                      \
+    hadamard_kernel<D, MODE, FMT, R, W><<<(rows + R - 1) / R, R * W>>>(          \
+        x, y, rows, dtype, norm, signs, seed, data, scales, amax, p);             \
+    break;                                                                      \
+  }
+#else
+#define HAD_CASE(D)                                                             \
+  case D:                                                                       \
+    hadamard_kernel<D, MODE, FMT>                                                \
+        <<<(rows + 3) / 4, 4 * (D <= 128 ? 32 : BUTTERFLY_LANES)>>>(             \
+            x, y, rows, dtype, norm, signs, seed, data, scales, amax, p);          \
     break
+#endif
   switch (d) {
     HAD_CASE(1);
     HAD_CASE(2);
@@ -158,14 +176,15 @@ inline void fused_had(const void *x, size_t rows, int d, int dtype, bool norm,
   launch_had<2>(x, nullptr, rows, d, dtype, norm, signs, seed, data, scales, amax, p);
 }
 
-// MACA WMMA fragments span a native 64-lane wave, unlike CUDA's 32 lanes.
-// Butterfly kernels also use the native wave; quantization groups stay 16/32.
-#if defined(__MACACC__)
+// MACA and CoreX matrix fragments span 64 lanes; NVIDIA fragments span 32.
+// Quantization still groups consecutive values into logical 16/32-value blocks.
+#if defined(__MACACC__) || defined(__ILUVATAR__)
 constexpr int MATRIX_LANES = 64;
 #else
 constexpr int MATRIX_LANES = 32;
 #endif
 
+#if !defined(__ILUVATAR__)
 // Explicit FP16 Tensor Core comparison: dense X*H, 16x16 WMMA tiles.
 // Its O(D^2) arithmetic differs from the O(D log D) butterfly algorithm.
 __global__ void hadamard_tc(const __half *x, const __half *h, __half *y, size_t rows,
@@ -206,4 +225,5 @@ __global__ void hadamard_tc(const __half *x, const __half *h, __half *y, size_t 
           __float2half_rn(result[warp][i] * (norm ? 1.0f / sqrtf(float(d)) : 1.0f));
   }
 }
+#endif
 } // namespace lp

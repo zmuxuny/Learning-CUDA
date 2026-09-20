@@ -1,30 +1,30 @@
 #include "../include/host.hpp"
-#include "../src/tensor_core.cuh"
+#include "../src/hadamard.cuh"
 #include <random>
 using namespace lp;
 
-template <int D, int TYPE, int FMT, int W>
+template <int D, int TYPE, int FMT, int W, int LANES>
 void run_variant(Device &x, Device &y, Device &data, Device &scales, Device &amax,
                  const std::vector<uint8_t> &reference,
                  const std::vector<uint8_t> &refdata,
                  const std::vector<uint8_t> &refscales, Layout p, int trial) {
-  constexpr int ITEMS = D > 256 ? D : 256;
+  constexpr int ITEMS = D;
   size_t n = p.count(), blocks = (n + W * ITEMS - 1) / (W * ITEMS);
   int repeats = n > 16000000 ? 30 : 150;
   auto h = [&] {
-    hadamard_mma_kernel<D, TYPE, 0, FMT, W>
-        <<<blocks, W * MMA_LANES>>>(x.as<uint16_t>(), y.as<uint16_t>(), n, true, false, 7,
-                             nullptr, nullptr, nullptr, p);
+    hadamard_kernel<D, 0, FMT, W, LANES>
+        <<<blocks, W * LANES>>>(x.as<uint16_t>(), y.as<uint16_t>(), p.rows, TYPE, true,
+                                false, 7, nullptr, nullptr, nullptr, p);
   };
   auto f = [&] {
     if constexpr (FMT == NVFP4) {
       check(cudaMemsetAsync(amax.ptr, 0, 4));
-      hadamard_mma_kernel<D, TYPE, 1, FMT, W>
-          <<<blocks, W * MMA_LANES>>>(x.as<uint16_t>(), nullptr, n, true, false, 7, nullptr,
-                               nullptr, amax.as<float>(), p);
+      hadamard_kernel<D, 1, FMT, W, LANES>
+          <<<blocks, W * LANES>>>(x.as<uint16_t>(), nullptr, p.rows, TYPE, true, false,
+                                  7, nullptr, nullptr, amax.as<float>(), p);
     }
-    hadamard_mma_kernel<D, TYPE, 2, FMT, W><<<blocks, W * MMA_LANES>>>(
-        x.as<uint16_t>(), nullptr, n, true, false, 7, data.as<uint8_t>(),
+    hadamard_kernel<D, 2, FMT, W, LANES><<<blocks, W * LANES>>>(
+        x.as<uint16_t>(), nullptr, p.rows, TYPE, true, false, 7, data.as<uint8_t>(),
         scales.as<uint8_t>(), amax.as<float>(), p);
   };
   double hm = elapsed(h, repeats), fm = elapsed(f, repeats);
@@ -33,9 +33,9 @@ void run_variant(Device &x, Device &y, Device &data, Device &scales, Device &ama
   data.download(b.data(), b.size());
   scales.download(c.data(), c.size());
   if (a != reference || b != refdata || c != refscales)
-    throw std::runtime_error("MMA tuning output mismatch");
+    throw std::runtime_error("Butterfly tuning output mismatch");
   std::cout << p.rows << ',' << D << ',' << TYPE << ',' << FMT << ',' << W << ','
-            << trial << ',' << hm << ',' << fm << '\n';
+            << LANES << ',' << trial << ',' << hm << ',' << fm << '\n';
 }
 template <int D, int TYPE, int FMT> void shape(size_t rows) {
   Layout p{rows, D, TYPE, FMT, FMT == MXFP8 ? 32 : 16, false, false, 42};
@@ -47,30 +47,39 @@ template <int D, int TYPE, int FMT> void shape(size_t rows) {
   Device x(host.size() * 2), y(host.size() * 2), data(p.bytes()), scales(p.groups()),
       amax(4);
   x.upload(host.data(), host.size() * 2);
-  launch_had_mma(x.ptr, y.ptr, rows, D, TYPE, true, false, 7);
-  fused_had_mma(x.ptr, rows, D, TYPE, true, false, 7, data.as<uint8_t>(),
-                scales.as<uint8_t>(), amax.as<float>(), p);
+  launch_had<0>(x.ptr, y.ptr, rows, D, TYPE, true, false, 7, nullptr, nullptr, nullptr,
+                p);
+  fused_had(x.ptr, rows, D, TYPE, true, false, 7, data.as<uint8_t>(),
+            scales.as<uint8_t>(), amax.as<float>(), p);
   std::vector<uint8_t> a(host.size() * 2), b(p.bytes()), c(p.groups());
   y.download(a.data(), a.size());
   data.download(b.data(), b.size());
   scales.download(c.data(), c.size());
-#define RUN(W) run_variant<D, TYPE, FMT, W>(x, y, data, scales, amax, a, b, c, p, trial)
+#define RUN32(W)                                                                       \
+  run_variant<D, TYPE, FMT, W, 32>(x, y, data, scales, amax, a, b, c, p, trial)
+#define RUN64(W)                                                                       \
+  run_variant<D, TYPE, FMT, W, 64>(x, y, data, scales, amax, a, b, c, p, trial)
   for (int trial = 0; trial < 3; ++trial) {
+    RUN64(2);
+    RUN64(4);
+    RUN64(8);
+    RUN64(16);
     if (trial & 1) {
-      RUN(16);
-      RUN(8);
-      RUN(4);
-      RUN(2);
-      RUN(1);
+      RUN32(16);
+      RUN32(8);
+      RUN32(4);
+      RUN32(2);
+      RUN32(1);
     } else {
-      RUN(1);
-      RUN(2);
-      RUN(4);
-      RUN(8);
-      RUN(16);
+      RUN32(1);
+      RUN32(2);
+      RUN32(4);
+      RUN32(8);
+      RUN32(16);
     }
   }
-#undef RUN
+#undef RUN32
+#undef RUN64
 }
 template <int D> void dimensions(size_t rows) {
   shape<D, FP16, MXFP8>(rows);
@@ -80,7 +89,7 @@ template <int D> void dimensions(size_t rows) {
 }
 int main() {
   try {
-    std::cout << "rows,dim,dtype,format,warps,trial,had_ms,fused_ms\n";
+    std::cout << "rows,dim,dtype,format,warps,lanes,trial,had_ms,fused_ms\n";
     for (size_t rows : {size_t(32), size_t(8192)}) {
       dimensions<64>(rows);
       dimensions<128>(rows);

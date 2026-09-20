@@ -1,10 +1,16 @@
 # Hadamard 变换与量化融合
 
-新增 **MetaX C500** 支持：构建使用 `make PLATFORM=metax`，可执行文件位于 `build/metax/`；完整环境、正确性、调优和 mcTracer 证据见 [C500 报告](REPORT_C500.md)。
+支持 NVIDIA CUDA、沐曦 MACA 和天数 CoreX；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
 
-最新结果见 [RTX 4090 D 第二轮优化报告](REPORT_TUNING.md)：包含向量化量化/反量化、BF16 转换、软件舍入优化，以及独立的原生 FP8 对照。第一轮数据保留在 [4090 D 首轮报告](REPORT_4090D.md)，原 3060 数据保留在 [首版报告](REPORT.md)。
+| 平台 | 构建 | 二进制目录 | 实测与分析 |
+|---|---|---|---|
+| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_TUNING.md)、[3060 报告](REPORT.md) |
+| MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
+| Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
 
-题目 3，提交 ID：`zmuxuny`。实现 FP16/BF16 快速 Walsh-Hadamard 变换、MXFP8/NVFP4 融合量化，以及 FP16/BF16 Tensor Core 分解与融合路径（另保留 FP16 稠密 WMMA 对照）。本目录随附量化、文件读写和独立参考模块，可单独构建、测试和提交。
+天数实测 CoreX 4.4.0，默认 `COREX_PATH=/usr/local/corex`、`IVCORE_ARCH=ivcore11`；使用 CoreX clang 编译，运行前设置 `LD_LIBRARY_PATH=$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}`。`make PLATFORM=iluvatar test` 包含数值验证和 49,152 项随机哈希一致性检查。复现性能、Profiler 和 Sanitizer 的命令见对应平台报告。
+
+题目 3，训练营 ID：曹泽阳；提交目录：`zmuxuny`。实现 FP16/BF16 快速 Walsh-Hadamard 变换、MXFP8/NVFP4 融合量化，以及 FP16/BF16 Tensor Core 分解与融合路径（另保留 FP16 稠密 WMMA 对照）。本目录随附量化、文件读写和独立参考模块，可单独构建、测试和提交。
 
 ## 使用
 
@@ -28,7 +34,7 @@ python3 tests/benchmark.py
 
 采用自然顺序 Sylvester 矩阵 `H_1=[1]`，`H_2D=[[H_D,H_D],[H_D,-H_D]]`。默认输出 `y=x H_D / sqrt(D)`；`--normalize 0` 使用未归一化变换。`--random_sign 1` 在变换前沿最后一维应用固定 Rademacher 符号，所有行共用；`--sign_seed` 默认 7。
 
-计算在 FP32 寄存器中进行，最终转换回输入 dtype。每个 warp 处理一行、每个 CUDA block 有 4 个 warp；前 5 级蝶形通过 warp XOR shuffle 完成，其余级在同一线程的寄存器间完成。
+计算在 FP32 寄存器中进行，最终转换回输入 dtype。每个逻辑线程组处理一行；NVIDIA 使用 32 线程组，MACA/CoreX 根据维度选择 32 或 64 线程组。前 log₂(组宽) 级通过 XOR shuffle 完成，其余级在同一线程的寄存器间完成。线程组数与矩阵 fragment 布局按平台调优，具体映射见对应实现文件的注释。
 
 ## 融合语义
 

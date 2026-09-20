@@ -132,6 +132,7 @@ def main():
         "factorized_tc_max_abs_error_bf16": mma_maxerr[2],
         "oracle": "NumPy float64 dense Sylvester matrix",
     }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result))
 

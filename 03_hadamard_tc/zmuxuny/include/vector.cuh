@@ -125,7 +125,8 @@ template <int TYPE> __device__ __forceinline__ unsigned pack_pair(float lo, floa
     __half2 h = __floats2half2_rn(lo, hi);
     return *reinterpret_cast<unsigned *>(&h);
   } else {
-#if !defined(__MACACC__) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#if !defined(__MACACC__) && !defined(__ILUVATAR__) && defined(__CUDA_ARCH__) && \
+    __CUDA_ARCH__ >= 800
     unsigned bits;
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(bits) : "f"(hi), "f"(lo));
     return bits;

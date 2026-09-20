@@ -143,7 +143,7 @@ int main(int argc, char **argv) try {
     if (!get(o, "tc_output").empty())
       write_tensor(get(o, "tc_output"), t);
   }
-#if defined(__MACACC__) || LP_CUDA_ARCH >= 80
+#if defined(__MACACC__) || defined(__ILUVATAR__) || LP_CUDA_ARCH >= 80
   if (d >= 16 && get(o, "tensor_core", "1") == "1") {
     Device ty(x.data.size());
     double tc = elapsed(

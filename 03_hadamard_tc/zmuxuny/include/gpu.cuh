@@ -1,5 +1,6 @@
 #pragma once
 #include "vector.cuh"
+#include <algorithm>
 
 namespace lp {
 __global__ void maximum(const void *x, size_t n, int dtype, float *result) {
@@ -158,6 +159,29 @@ inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
     return;
   }
   constexpr int V = 8, THREADS = 256;
+#elif defined(__ILUVATAR__)
+  // MR-V100: two FP32 values per lane favor MXFP8, while NVFP4's
+  // 16-bit inputs benefit from eight. The scan is in results/iluvatar/.
+  if (p.count() <= 65536 || (p.dtype == FP32 && FMT == MXFP8)) {
+    constexpr int T = 256, VEC = 2;
+    size_t grid = (p.count() + T * VEC - 1) / (T * VEC);
+    if (p.dtype == FP32)
+      quant_vector_kernel<FMT, FP32, VEC><<<grid, T>>>(x, data, scales, amax, p);
+    else if (p.dtype == FP16)
+      quant_vector_kernel<FMT, FP16, VEC><<<grid, T>>>(x, data, scales, amax, p);
+    else
+      quant_vector_kernel<FMT, BF16, VEC><<<grid, T>>>(x, data, scales, amax, p);
+    return;
+  }
+  if (FMT == NVFP4 && p.dtype != FP32) {
+    size_t grid = (p.count() + 1023) / 1024;
+    if (p.dtype == FP16)
+      quant_vector_kernel<FMT, FP16, 8><<<grid, 128>>>(x, data, scales, amax, p);
+    else
+      quant_vector_kernel<FMT, BF16, 8><<<grid, 128>>>(x, data, scales, amax, p);
+    return;
+  }
+  constexpr int V = 4, THREADS = 128;
 #else
   constexpr int V = 4, THREADS = 128;
 #endif
@@ -172,7 +196,17 @@ inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
 
 inline void launch_max(const void *x, size_t n, int dtype, float *amax) {
   cudaMemsetAsync(amax, 0, sizeof(float));
-  size_t blocks = min(size_t(512), (n + 2047) / 2048);
+#if defined(__ILUVATAR__)
+  // Scalar FP32 accesses outperform vector loads on MR-V100. Half-size
+  // inputs use four values per lane; cap the grid to amortize the final atomics.
+  if (dtype == FP32)
+    maximum<<<std::min(size_t(256), (n + 255) / 256), 256>>>(x, n, dtype, amax);
+  else if (dtype == FP16)
+    maximum_vector<FP16, 4><<<std::min(size_t(128), (n + 2047) / 2048), 512>>>(x, n, amax);
+  else
+    maximum_vector<BF16, 4><<<std::min(size_t(128), (n + 2047) / 2048), 512>>>(x, n, amax);
+#else
+  size_t blocks = std::min(size_t(512), (n + 2047) / 2048);
 #if defined(__MACACC__)
   constexpr int FP32_VECTOR = 4;
 #else
@@ -184,6 +218,7 @@ inline void launch_max(const void *x, size_t n, int dtype, float *amax) {
     maximum_vector<FP16, 8><<<blocks, 256>>>(x, n, amax);
   else
     maximum_vector<BF16, 8><<<blocks, 256>>>(x, n, amax);
+#endif
 }
 // Reuse an already computed tensor maximum (e.g. a fused transform+amax).
 inline void quantize_with_amax(const void *x, uint8_t *data, uint8_t *scales,
@@ -225,6 +260,15 @@ inline void launch_dequant_vector(const uint8_t *data, const uint8_t *scales,
     return;
   }
   int half_threads = p.count() <= 1048576 ? 512 : 128;
+#elif defined(__ILUVATAR__)
+  // Small outputs favor fewer, wider CTAs; large outputs retain the streamed
+  // vector path. Keep the cutoff aligned with the tested quantization boundary.
+  int half_threads = p.count() <= 65536 ? 512 : 128;
+  if (out_type == FP32 && p.count() <= 65536) {
+    dequant_vector_kernel<FMT, FP32, 8><<<(p.count() + 4095) / 4096, 512>>>(
+        data, scales, global, out, p);
+    return;
+  }
 #else
   constexpr int half_threads = 128;
 #endif
