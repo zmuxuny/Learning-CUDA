@@ -1,6 +1,10 @@
 #include "../include/host.hpp"
+#if defined(LP_ASCEND)
+#include "../ascend/hadamard.hpp"
+#else
 #include "hadamard.cuh"
 #include "tensor_core.cuh"
+#endif
 
 using namespace lp;
 
@@ -117,6 +121,7 @@ int main(int argc, char **argv) try {
                   {"hadamard_effective_gbps", 2 * x.data.size() / hms / 1e6},
                   {"packed_equal", 1},
                   {"repeats", double(repeats)}});
+#if !defined(LP_ASCEND)
   if (x.dtype == FP16 && d >= 16 && get(o, "tensor_core", "1") == "1") {
     std::vector<__half> h(d * d);
     for (int r = 0; r < d; ++r)
@@ -143,7 +148,8 @@ int main(int argc, char **argv) try {
     if (!get(o, "tc_output").empty())
       write_tensor(get(o, "tc_output"), t);
   }
-#if defined(__MACACC__) || defined(__ILUVATAR__) || defined(__MUSACC__) || LP_CUDA_ARCH >= 80
+#endif
+#if defined(LP_ASCEND) || defined(__MACACC__) || defined(__ILUVATAR__) || defined(__MUSACC__) || LP_CUDA_ARCH >= 80
   if (d >= 16 && get(o, "tensor_core", "1") == "1") {
     Device ty(x.data.size());
     double tc = elapsed(

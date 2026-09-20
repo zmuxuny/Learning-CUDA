@@ -5,7 +5,7 @@
 - fork：`zmuxuny/Learning-CUDA`
 - head：`projects/hadamard`
 - base：`InfiniTensor/Learning-CUDA:2026-summer-project`
-- 标题：`【训练营】【题目3】Hadamard 变换与量化融合`
+- 标题：`【训练营】【题目3】Hadamard 矩阵加速与量化融合（多平台）`
 
 本题目录内运行：
 

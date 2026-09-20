@@ -101,10 +101,14 @@ def main():
             expected = quantize(y, fmt, 32 if fmt == 0 else 16, stochastic=stochastic)
             assert_packed(read_packed(t / "packed"), expected)
             assert (t / "packed").read_bytes() == (t / "unfused").read_bytes()
-            if dtype == 1 and d >= 16:
+            metrics = json.loads((t / "log").read_text())
+            if dtype == 1 and d >= 16 and metrics["platform"] != "ascend_cann":
+                assert "tensor_core_ms" in metrics
+            if d >= 16 and metrics["platform"] == "ascend_cann":
+                assert "factorized_tc_ms" in metrics
+            if "tensor_core_ms" in metrics:
                 tc, _ = read_tensor(t / "tc")
                 assert np.max(np.abs(tc - ref)) < 1e-2
-            metrics = json.loads((t / "log").read_text())
             if "factorized_tc_ms" in metrics:
                 mma, _ = read_tensor(t / "mma")
                 error = float(np.max(np.abs(mma - ref)))

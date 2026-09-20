@@ -6,6 +6,7 @@
 #include <vector>
 
 constexpr int COUNT = 4096;
+#if !defined(LP_ASCEND)
 __global__ void hashes(float *out, uint64_t base, uint32_t seed) {
   unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < COUNT)
@@ -17,6 +18,10 @@ __global__ void products(const float *a, const float *b, float *out, bool divisi
   if (i < COUNT)
     out[i] = division ? lp::divide_rn(a[i], b[i]) : lp::multiply_rn(a[i], b[i]);
 }
+
+#else
+extern "C" void launch_ascend_numeric(void*,void*,void*,void*,uint64_t,uint32_t,int);
+#endif
 
 int main() {
   float *device = nullptr;
@@ -32,7 +37,11 @@ int main() {
   size_t checked = 0;
   for (uint64_t base : {0ULL, (1ULL << 32) - 65, 1ULL << 40}) {
     for (uint32_t seed : {0U, 7U, 42U, 0xffffffffU}) {
+#if defined(LP_ASCEND)
+      launch_ascend_numeric(lp_ascend::stream(),nullptr,nullptr,device,base,seed,0);
+#else
       hashes<<<COUNT / 256, 256>>>(device, base, seed);
+#endif
       if (!check(cudaGetLastError()) ||
           !check(cudaMemcpy(result.data(), device, COUNT * sizeof(float),
                             cudaMemcpyDeviceToHost)))
@@ -77,7 +86,11 @@ int main() {
             cudaMemcpy(da, a.data(), COUNT * sizeof(float), cudaMemcpyHostToDevice)) ||
         !check(cudaMemcpy(db, b.data(), COUNT * sizeof(float), cudaMemcpyHostToDevice)))
       return 1;
+#if defined(LP_ASCEND)
+    launch_ascend_numeric(lp_ascend::stream(),da,db,device,0,0,1);
+#else
     products<<<COUNT / 256, 256>>>(da, db, device, false);
+#endif
     if (!check(cudaGetLastError()) ||
         !check(cudaMemcpy(result.data(), device, COUNT * sizeof(float),
                           cudaMemcpyDeviceToHost)))
@@ -115,7 +128,11 @@ int main() {
             cudaMemcpy(da, a.data(), COUNT * sizeof(float), cudaMemcpyHostToDevice)) ||
         !check(cudaMemcpy(db, b.data(), COUNT * sizeof(float), cudaMemcpyHostToDevice)))
       return 1;
+#if defined(LP_ASCEND)
+    launch_ascend_numeric(lp_ascend::stream(),da,db,device,0,0,2);
+#else
     products<<<COUNT / 256, 256>>>(da, db, device, true);
+#endif
     if (!check(cudaGetLastError()) ||
         !check(cudaMemcpy(result.data(), device, COUNT * sizeof(float),
                           cudaMemcpyDeviceToHost)))

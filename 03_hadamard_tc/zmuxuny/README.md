@@ -1,6 +1,6 @@
 # Hadamard 变换与量化融合
 
-支持 NVIDIA CUDA、沐曦 MACA、天数 CoreX 和摩尔线程 MUSA；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
+支持 NVIDIA CUDA、沐曦 MACA、天数 CoreX、摩尔线程 MUSA 和昇腾 CANN；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
 
 | 平台 | 构建 | 二进制目录 | 实测与分析 |
 |---|---|---|---|
@@ -8,10 +8,13 @@
 | MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
 | Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
 | Moore Threads MTT S4000 | `make PLATFORM=musa` | `build/musa/` | [S4000 报告](REPORT_MUSA.md) |
+| Ascend 910B2 | `make PLATFORM=ascend` | `build/ascend/` | [昇腾报告](REPORT_ASCEND.md) |
 
 天数实测 CoreX 4.4.0，默认 `COREX_PATH=/usr/local/corex`、`IVCORE_ARCH=ivcore11`；使用 CoreX clang 编译，运行前设置 `LD_LIBRARY_PATH=$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}`。`make PLATFORM=iluvatar test` 包含数值验证和 49,152 项随机哈希一致性检查。复现性能、Profiler 和 Sanitizer 的命令见对应平台报告。
 
 摩尔线程实测 MUSA 4.3.6 / `mp_22`，默认 `MUSA_PATH=/usr/local/musa`；运行前设置 `MUSA_VISIBLE_DEVICES=0` 和 `LD_LIBRARY_PATH=$MUSA_PATH/lib:${LD_LIBRARY_PATH:-}`。完整数值验证、参数扫描及工具采样命令见 [S4000 报告](REPORT_MUSA.md)。
+
+昇腾实测 ARM64 / CANN 9.0 / 910B2，使用 Ascend C 独立内核和 ACL 运行时。先执行 `source /usr/local/Ascend/ascend-toolkit/set_env.sh`，再运行 `make PLATFORM=ascend test`；测试、性能对照及 msprof / mssanitizer 说明见 [昇腾报告](REPORT_ASCEND.md)。
 
 题目 3，训练营 ID：曹泽阳；提交目录：`zmuxuny`。实现 FP16/BF16 快速 Walsh-Hadamard 变换、MXFP8/NVFP4 融合量化，以及 FP16/BF16 Tensor Core 分解与融合路径（另保留 FP16 稠密 WMMA 对照）。本目录随附量化、文件读写和独立参考模块，可单独构建、测试和提交。
 
@@ -37,7 +40,7 @@ python3 tests/benchmark.py
 
 采用自然顺序 Sylvester 矩阵 `H_1=[1]`，`H_2D=[[H_D,H_D],[H_D,-H_D]]`。默认输出 `y=x H_D / sqrt(D)`；`--normalize 0` 使用未归一化变换。`--random_sign 1` 在变换前沿最后一维应用固定 Rademacher 符号，所有行共用；`--sign_seed` 默认 7。
 
-计算在 FP32 寄存器中进行，最终转换回输入 dtype。每个逻辑线程组处理一行；NVIDIA 使用 32 线程组，MACA/CoreX 根据维度选择 32 或 64 线程组。前 log₂(组宽) 级通过 XOR shuffle 完成，其余级在同一线程的寄存器间完成。线程组数与矩阵 fragment 布局按平台调优，具体映射见对应实现文件的注释。
+CUDA 及其兼容后端在 FP32 寄存器中计算，最终转换回输入 dtype。昇腾使用 UB 中的 FP32 标量/向量蝶形，矩阵分解路径直接使用 Mmad/Fixpipe；保留 H16 的 FP32 中间结果，再完成剩余蝶形和量化。每个逻辑线程组处理一行；NVIDIA 使用 32 线程组，MACA/CoreX 根据维度选择 32 或 64 线程组。前 log₂(组宽) 级通过 XOR shuffle 完成，其余级在同一线程的寄存器间完成。线程组数与矩阵 fragment 布局按平台调优，具体映射见对应实现文件的注释。
 
 ## 融合语义
 
@@ -53,7 +56,7 @@ NVFP4 的全局 scale 依赖整个变换后的张量，不能仅凭单个 warp �
 
 新路径将 `H_D` 分解为 `H_(D/16) ⊗ H_16`，使用两条 `mma.sync.m16n8k16` 处理 H16，其余级用 FP32 寄存器蝶形合并。FP16/BF16 均使用对应原生 MMA，累加为 FP32，复杂度 O(D log D)。进一步在寄存器内完成 MXFP8/NVFP4 量化；NVFP4 仍包含全局 amax 预遍历。
 
-主程序默认同时测量蝶形、分解 Tensor Core，以及 FP16 稠密 WMMA 对照。`--tensor_core 0` 可关闭 Tensor Core 测量。默认 `--output` 与 `--packed` 保存蝶形结果；指定下列参数可保存新 Tensor Core 路径的结果：
+主程序默认测量蝶形和分解矩阵路径；CUDA 及兼容后端另有 FP16 稠密 WMMA 对照。昇腾的矩阵路径采用 H16 分解，支持 FP16/BF16。`--tensor_core 0` 可关闭 Tensor Core 测量。默认 `--output` 与 `--packed` 保存蝶形结果；指定下列参数可保存新 Tensor Core 路径的结果：
 
 ```bash
 ./build/hadamard --input results/tmp/input.bin \
