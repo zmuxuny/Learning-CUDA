@@ -57,7 +57,7 @@ def main():
             "- 软件 E4M3/E2M1 编码、E8M0/E4M3 缩放、最近偶数与随机舍入共用数值函数；支持 FP32/FP16 输入及 FP32/FP16/BF16 输出。FP4 两个值合成一个字节，奇数行尾高半字节清零。",
             "- 初始实现逐组读取 GM，并为每个 scale 和 packed 小块发起搬运。当前实现每次 DMA 搬入最多 1024 个元素，在 UB 内处理完整缩放组，批量写出对应 data/scale；分块不跨行，支持 16–1024 间 16 的倍数块长。",
             "- 全局 amax 以 4096 元素分块，使用向量转换、Abs、ReduceMax，再归并各 core 的部分最大值。部分最大值间隔 64 字节，避免标量写回共享缓存行。全次正规数 FP32 tile 保留标量回退，防止向量路径冲零改变缩放。",
-            "- MXFP8 使用精确的 2 的幂缩放；NVFP4 最近舍入比较缩放后的精确码本中点，随机舍入保留商和按元素索引生成的随机数。反量化将 packed codes 和 scales 批量搬入 UB。",
+            "- MXFP8 使用精确的 2 的幂缩放；NVFP4 最近舍入比较缩放后的精确码本中点，随机舍入保留商和按元素索引生成的随机数。反量化直接读取 GM 中的 packed codes 和 scales，并批量写出重建值。",
             "- 输出使用支持字节长度的 DataCopyPad，避免奇数列和相邻组通过标量字节写入产生缓存行冲突；Scalar、Vector、MTE2/MTE3 间以事件同步。最终归约后恢复向量掩码。",
         ]
     text += [
@@ -129,7 +129,7 @@ def main():
             )
         text += [
             "",
-            "128MiB 的两种输入精度均以矩阵分解为优选：MXFP8 选择矩阵融合，NVFP4 选择矩阵非融合。写回并合并 amax 的方案减少一次启动，但本轮仍略慢于非融合；小尺寸需参考完整记录分别选择。FP32 中间结果的 GM 交接和软件编码仍有优化空间。",
+            "128MiB 的两种输入精度均以矩阵分解为优选：MXFP8 选择矩阵融合，NVFP4 选择矩阵非融合。写回并合并 amax 的方案减少一次启动，但该平台实验仍略慢于非融合；小尺寸需参考完整记录分别选择。FP32 中间结果的 GM 交接和软件编码仍有优化空间。",
         ]
     text += [
         "",
@@ -167,7 +167,7 @@ def main():
         "",
         "上述流水线比率来自工具，可能与其他流水线重叠，不能相加当作总时间分解。小规模采样用于核验执行路径；大尺寸结论使用独立基准。",
         "",
-        f'mssanitizer 基础模式共 **{passed}/{len(sanitize["records"])} 次**满足：进程退出为零、实际 kernel 检查开始与完成次数一致、全部明确无错误且无警告。本轮实际执行基础 memcheck；racecheck/initcheck/synccheck 要求源码插桩，当前未能执行，不计作通过。[检查汇总及日志](results/ascend/sanitize/summary.json)。',
+        f'mssanitizer 基础模式共 **{passed}/{len(sanitize["records"])} 次**满足：进程退出为零、实际 kernel 检查开始与完成次数一致、全部明确无错误且无警告。该平台实验实际执行基础 memcheck；racecheck/initcheck/synccheck 要求源码插桩，当前未能执行，不计作通过。[检查汇总及日志](results/ascend/sanitize/summary.json)。',
         "",
         "完整 `--cce-enable-sanitizer` 源码插桩未通过本镜像的构建/运行验证，不能把基础模式结果表述为全量插桩通过。直接编译及最小样例触发毕昇后端 FrameIndex 错误；分阶段实验超时，原始记录见 [工具限制](results/ascend/tools_limitations/sanitizer_build_debug.log)。基础模式发现的向量掩码恢复警告已修复并复测。",
         "",
@@ -273,3 +273,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    from report_final import finalize_platform_report
+    finalize_platform_report(ROOT, 'ascend')

@@ -26,7 +26,7 @@ python3 tests/benchmark.py
 
 | 平台 | 构建 | 二进制目录 | 实测与分析 |
 |---|---|---|---|
-| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_TUNING.md)、[3060 首版归档](REPORT_3060_INITIAL.md) |
+| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_4090D.md) |
 | MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
 | Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
 | Moore Threads MTT S4000 | `make PLATFORM=musa` | `build/musa/` | [S4000 报告](REPORT_MUSA.md) |
@@ -80,13 +80,13 @@ NVFP4 的全局 scale 依赖整个变换后的张量，不能仅凭单个 warp �
 
 使用 CUDA event，预热 3 次；重复次数由 `--repeats` 指定。有效带宽按逻辑输入输出字节数计算。`unfused_ms` 包含变换和完整量化，`fused_ms` 包含融合所需的所有 GPU 步骤。小尺寸主要受启动开销影响，数据传输计时单独报告。实测分析见 [REPORT.md](REPORT.md)。
 
-运行 `python3 tests/report.py` 仅重建首版 `REPORT_3060_INITIAL.md` 和图；`tests/profile.py` 可独立运行 profiler/sanitizer 检查。`include/` 和 `tests/reference.py` 是本作者题目 2 数值模块的本地副本，初始数值版本为 b7480df，后续软件编码与索引优化同步维护；保留副本是为使两份 PR 不依赖彼此的合并顺序。
+运行 `python3 tests/report.py` 可重建总收益数据及平台性能表；`tests/profile.py` 可独立运行 profiler/sanitizer 检查。`include/` 和 `tests/reference.py` 是本作者题目 2 数值模块的本地副本，两题的数值语义保持一致；保留副本是为使两份 PR 不依赖彼此的合并顺序。
 
 原生 Linux 分析结果及本机 WSL 设置说明见 [PROFILING.md](PROFILING.md)。
 
 ## 软件优化与可选硬件转换
 
-默认量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [4090 D 实验报告](REPORT_TUNING.md)。
+默认量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [4090 D 实验报告](REPORT_4090D.md)。
 
 额外的 Ada FP8 转换对照使用独立可执行文件，不改变默认程序；需要 CUDA >=12.1 和 `sm_89` 或更新：
 
