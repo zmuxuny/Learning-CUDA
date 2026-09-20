@@ -1,13 +1,12 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include "platform.cuh"
 
 #ifndef LP_NATIVE_FP8
 #define LP_NATIVE_FP8 0
 #endif
-#if LP_NATIVE_FP8 && (defined(__MACACC__) || defined(__ILUVATAR__))
+#if LP_NATIVE_FP8 && (defined(__MACACC__) || defined(__ILUVATAR__) || defined(__MUSACC__))
 #error "Native NVIDIA FP8 encoding is unavailable on this platform; use the software target"
 #endif
 #if LP_NATIVE_FP8 && defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 890
@@ -27,6 +26,8 @@ inline const char *compute_platform() {
   return "metax_maca";
 #elif defined(__ILUVATAR__)
   return "iluvatar_corex";
+#elif defined(__MUSACC__)
+  return "moore_musa";
 #else
   return "nvidia_cuda";
 #endif
@@ -40,7 +41,7 @@ enum Format { MXFP8 = 0, NVFP4 = 1 };
 // Use native round-to-nearest BF16 conversion on Ampere+, with the original
 // bit-exact integer implementation for the CPU and older architectures.
 __host__ __device__ inline uint16_t bf16(float x) {
-#if !defined(__MACACC__) && !defined(__ILUVATAR__) && defined(__CUDA_ARCH__) && \
+#if !defined(__MACACC__) && !defined(__ILUVATAR__) && !defined(__MUSACC__) && defined(__CUDA_ARCH__) && \
     __CUDA_ARCH__ >= 800
   uint16_t result;
   asm("cvt.rn.bf16.f32 %0, %1;" : "=h"(result) : "f"(x));
@@ -195,6 +196,41 @@ __host__ __device__ inline uint8_t encode4(float x, bool stochastic = false,
   }
   return uint8_t(c | (negative(x) ? 8 : 0));
 }
+// Certify an approximate quotient before accepting it. With normal inputs,
+// FMA gives a rounded residual a-q*b. Each rounding-interval boundary is b
+// times a power of two, hence exact here. A residual strictly between those
+// representable boundaries proves q is the correctly rounded quotient. Ties,
+// extreme exponents and an uncertified candidate use the precise SDK divider.
+__host__ __device__ inline float divide_rn(float a, float b) {
+#if defined(__MUSA_ARCH__)
+  union Bits { float f; uint32_t u; } x{a}, y{b}, q{}, upper{}, lower{};
+  unsigned sign = (x.u ^ y.u) & 0x80000000U;
+  x.u &= 0x7fffffffU;
+  y.u &= 0x7fffffffU;
+  unsigned ex = x.u >> 23, ey = y.u >> 23;
+  // This range also keeps reciprocal, residual boundaries and correction
+  // products away from FP32 underflow/overflow on S4000.
+  if (ex >= 67 && ex <= 187 && ey >= 67 && ey <= 187) {
+    float r = __fdividef(1.0f, y.f);
+    q.f = x.f * r;
+    q.f = __fmaf_rn(__fmaf_rn(-q.f, y.f, x.f), r, q.f);
+    unsigned eq = q.u >> 23;
+    if (eq >= 67 && eq <= 187 && ey + eq >= 153) {
+      upper.u = (eq - 24) << 23;
+      lower.u = (eq - 24 - ((q.u & 0x7fffffU) == 0)) << 23;
+      float residual = __fmaf_rn(-q.f, y.f, x.f);
+      if (residual < y.f * upper.f && residual > -y.f * lower.f) {
+        q.u |= sign;
+        return q.f;
+      }
+    }
+  }
+  return __fdiv_rn(a, b);
+#else
+  return a / b;
+#endif
+}
+
 // E4M3 scales times the E2M1 decision midpoints are exactly representable
 // in FP32. Comparing in the scaled domain removes one division for RNE.
 // Stochastic rounding still uses the rounded quotient and its original RNG.
@@ -203,7 +239,7 @@ __host__ __device__ inline uint8_t encode4_scaled(float x, float scale, bool sto
   if (scale == 0)
     return 0;
   if (stochastic)
-    return encode4(x / scale, true, u);
+    return encode4(divide_rn(x, scale), true, u);
   float a = fabsf(x);
   unsigned c = (a > scale * 0.25f) + (a >= scale * 0.75f) + (a > scale * 1.25f) +
                (a >= scale * 1.75f) + (a > scale * 2.5f) + (a >= scale * 3.5f) +
@@ -223,27 +259,84 @@ __host__ __device__ inline uint8_t mx_scale(float amax) {
     int code = exponent - 8 + int((bits.u & 0x7fffffU) > 0x600000U);
     return uint8_t(code < 0 ? 0 : (code > 254 ? 254 : code));
   }
-  // Subnormal FP32 values need the full normalization path.
-  int e;
-  float m = frexpf(amax, &e);
-  e -= m <= 0.875f ? 9 : 8;
-  int code = e + 127;
-  return uint8_t(code < 0 ? 0 : (code > 254 ? 254 : code));
+  // Every nonzero FP32 subnormal requires a scale below the minimum E8M0
+  // value. Its clamped code is therefore zero; no floating normalization.
+  return 0;
 }
 __host__ __device__ inline float scale_value(uint8_t s, int fmt) {
-  if (fmt != MXFP8)
+  if (fmt != MXFP8) {
+#if defined(__MUSA_ARCH__)
+    // MUSA 4.3.6 can fold a shuffle-derived scale==0 predicate incorrectly
+    // for padded NVFP4 groups. Materialize only this decoded scale so its
+    // zero test and arithmetic consume the same lane-local value.
+    volatile float decoded = fp8_value(s);
+    return decoded;
+#else
     return fp8_value(s);
+#endif
+  }
   union {
     uint32_t u;
     float f;
   } bits{s == 0 ? 0x00400000U : uint32_t(s) << 23};
   return bits.f;
 }
+// S4000 FP32 multiplication flushes subnormal products even with IEEE compiler
+// flags. Decode the rare underflow case as an exact 24x24-bit product, then
+// round once to nearest-even. Ordinary normal products keep the hardware path.
+__host__ __device__ inline float multiply_rn(float a, float b) {
+#if defined(__MUSA_ARCH__)
+  union Bits { float f; uint32_t u; } x{a}, y{b}, result{};
+  unsigned ax = x.u & 0x7fffffffU, ay = y.u & 0x7fffffffU;
+  int ex = int(ax >> 23), ey = int(ay >> 23);
+  if (ex && ey && ex + ey > 127)
+    return a * b;
+  unsigned sign = (x.u ^ y.u) & 0x80000000U;
+  uint64_t mx = (ax & 0x7fffffU) | (ex ? 0x800000U : 0);
+  uint64_t my = (ay & 0x7fffffU) | (ey ? 0x800000U : 0);
+  uint64_t product = mx * my;
+  if (!product) { result.u = sign; return result.f; }
+  int exponent = (ex ? ex : 1) + (ey ? ey : 1) - 300;
+  int top = 63 - __clzll(product);
+  int unbiased = exponent + top;
+  int shift = unbiased < -126 ? -149 - exponent : top - 23;
+  uint64_t rounded;
+  if (shift <= 0) {
+    rounded = product << (-shift);
+  } else if (shift >= 64) {
+    rounded = 0;
+  } else {
+    rounded = product >> shift;
+    uint64_t remainder = product & ((uint64_t(1) << shift) - 1);
+    uint64_t midpoint = uint64_t(1) << (shift - 1);
+    rounded += remainder > midpoint || (remainder == midpoint && (rounded & 1));
+  }
+  if (unbiased < -126) {
+    result.u = sign | unsigned(rounded); // Includes rounding up to min-normal.
+  } else {
+    if (rounded == 0x1000000ULL) { rounded >>= 1; ++unbiased; }
+    result.u = sign | (unsigned(unbiased + 127) << 23) | (unsigned(rounded) & 0x7fffffU);
+  }
+  return result.f;
+#else
+  return a * b;
+#endif
+}
+
 // Dividing by an E8M0 scale equals multiplying by its exact power-of-two
 // reciprocal. Scale code zero has no finite FP32 reciprocal and uses division.
 __host__ __device__ inline float mx_scaled(float x, uint8_t s) {
+#if defined(__MUSA_ARCH__)
+  // Avoid both a subnormal divisor and a subnormal reciprocal on S4000.
+  // Explicit multiplication also prevents reciprocal folding by the compiler.
+  if (s == 0)
+    return multiply_rn(x, 0x1p127f);
+  if (s == 254)
+    return multiply_rn(x, 0x1p-127f);
+#else
   if (s == 0)
     return x / 0x1p-127f;
+#endif
   union {
     uint32_t u;
     float f;
@@ -252,6 +345,6 @@ __host__ __device__ inline float mx_scaled(float x, uint8_t s) {
 }
 __host__ __device__ inline float global_scale(float amax) {
   // Preserve a nonzero scale for subnormal FP32 inputs as well.
-  return amax == 0 ? 1.0f : fmaxf(amax / 2688.0f, 0x1p-126f);
+  return amax == 0 ? 1.0f : fmaxf(divide_rn(amax, 2688.0f), 0x1p-126f);
 }
 } // namespace lp
