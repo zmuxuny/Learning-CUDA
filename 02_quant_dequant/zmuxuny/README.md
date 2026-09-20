@@ -1,10 +1,16 @@
 # MXFP8 / NVFP4 软件量化与反量化
 
-新增 **MetaX C500** 支持：构建使用 `make PLATFORM=metax`，可执行文件位于 `build/metax/`；完整环境、正确性、调优和 mcTracer 证据见 [C500 报告](REPORT_C500.md)。
+支持 NVIDIA CUDA、沐曦 MACA 和天数 CoreX；各后端共享软件 MXFP8/NVFP4 编码、文件协议及独立 NumPy 参考。每题目录均可独立构建和测试。
 
-最新结果见 [RTX 4090 D 第二轮优化报告](REPORT_TUNING.md)：包含向量化量化/反量化、BF16 转换、软件舍入优化，以及独立的原生 FP8 对照。第一轮数据保留在 [4090 D 首轮报告](REPORT_4090D.md)，原 3060 数据保留在 [首版报告](REPORT.md)。
+| 平台 | 构建 | 二进制目录 | 实测与分析 |
+|---|---|---|---|
+| NVIDIA RTX 3060 / 4090 D | `make ARCH=86` / `make ARCH=89` | `build/` | [4090 D 报告](REPORT_TUNING.md)、[3060 报告](REPORT.md) |
+| MetaX C500 | `make PLATFORM=metax` | `build/metax/` | [C500 报告](REPORT_C500.md) |
+| Iluvatar 智铠 100（MR-V100） | `make PLATFORM=iluvatar` | `build/iluvatar/` | [MR-V100 报告](REPORT_ILUVATAR.md) |
 
-题目 2，提交 ID：`zmuxuny`。默认程序为纯 CUDA 软件实现，编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
+天数实测 CoreX 4.4.0，默认 `COREX_PATH=/usr/local/corex`、`IVCORE_ARCH=ivcore11`；使用 CoreX clang 编译，运行前设置 `LD_LIBRARY_PATH=$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}`。`make PLATFORM=iluvatar test` 包含数值验证和 49,152 项随机哈希一致性检查。复现性能、Profiler 和 Sanitizer 的命令见对应平台报告。
+
+题目 2，训练营 ID：曹泽阳；提交目录：`zmuxuny`。默认程序为纯 CUDA 软件实现，编译目标为 Turing `sm_75`，不使用硬件 FP8/FP4 转换指令或 Tensor Core。数值编码、缩放、打包、解包均由本项目实现。本目录可独立构建、测试和提交。
 
 ## 构建与运行
 
@@ -113,7 +119,7 @@ python3 tests/report_4090.py
 
 ## 第二轮调优与可选硬件转换
 
-默认量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [第二轮报告](REPORT_TUNING.md)。
+NVIDIA 后端量化在整块对齐输入上使用每线程 4 元素向量读写，反量化按输出类型使用 4/8 元素；全局 amax 使用向量加载和 CTA 归约。FP8 软件最近偶数舍入通过整数进位完成。BF16 在 Ampere 及更新架构使用原生转换，较旧架构保留位运算实现。详情、消融与全部实测见 [第二轮报告](REPORT_TUNING.md)。
 
 额外的 Ada FP8 转换对照使用独立可执行文件，不改变默认程序；需要 CUDA >=12.1 和 `sm_89` 或更新：
 

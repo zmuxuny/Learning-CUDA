@@ -1,3 +1,22 @@
+# Iluvatar MR-V100 性能分析与内存检查
+
+CoreX 4.4.0 提供 `ixsys` 设备时间线、`ixkn-cli` 硬件计数器和 `ixsan` 内存检查。性能加速比使用未插桩设备事件计时；插桩数据用于分析 kernel 组成、资源占用和指令类型。
+
+```bash
+export COREX_PATH=/usr/local/corex
+export LD_LIBRARY_PATH="$COREX_PATH/lib64:${LD_LIBRARY_PATH:-}"
+make PLATFORM=iluvatar
+python3 tests/profile_iluvatar.py --mode sanitizer
+python3 tests/profile_iluvatar.py --mode trace
+python3 tests/profile_iluvatar.py --mode counters
+```
+
+每种格式和输入类型分别运行 memcheck、racecheck、initcheck，合计 12 次；检查日志保留明确的零错误/零 hazard 汇总。运行命令、退出码和二进制 SHA256 见 [Sanitizer 汇总](results/iluvatar/profile/summary_sanitizer.json)。本平台工具未提供 synccheck，不能将 racecheck 表述为同步检查的替代。
+
+[MR-V100 完整报告](REPORT_ILUVATAR.md) · [设备时间线汇总](results/iluvatar/profile/summary_trace.json) · [硬件计数器汇总](results/iluvatar/profile/summary_counters.json)。`.ixsys` 文件为 IXplorer 原生 SQLite 时间线，可用 GUI 打开；每个用例同时保留可直接阅读的 `.log`。硬件计数器采用 kernel replay，其耗时不参与基准加速比计算。
+
+---
+
 # MetaX C500 采样入口
 
 C500 使用 MACA 自带的 `mcTracer`，已经采集量化、反量化及 Hadamard 各路径的设备时间线。结果见 [C500 报告](REPORT_C500.md) 和 [采样汇总](results/c500/profile/summary.json)，原始 JSON 位于汇总的 `trace` 字段所指文件。
