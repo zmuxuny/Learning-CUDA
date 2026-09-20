@@ -65,7 +65,7 @@ __global__ void quant_vector_kernel(const void *x, uint8_t *data, uint8_t *scale
   float global = FMT == NVFP4 ? global_scale(*amax) : 1;
   unsigned s = 0;
   if (threadIdx.x % WIDTH == 0)
-    s = p.tensor ? scales[0] : (FMT == MXFP8 ? mx_scale(a) : encode8((a / global) / 6));
+    s = p.tensor ? scales[0] : (FMT == MXFP8 ? mx_scale(a) : encode8(divide_rn(divide_rn(a, global), 6.0f)));
   s = __shfl_sync(FULL_WARP_MASK, s, 0, WIDTH);
   if (valid && !p.tensor && threadIdx.x % WIDTH == 0)
     scales[i / B] = uint8_t(s);
@@ -91,7 +91,7 @@ __global__ void quant_vector_kernel(const void *x, uint8_t *data, uint8_t *scale
       if constexpr (FMT == MXFP8)
         codes[k] = encode8(mx_scaled(values[k], uint8_t(s)), p.stochastic, u);
       else
-        codes[k] = encode4_scaled(values[k] / global, scale, p.stochastic, u);
+        codes[k] = encode4_scaled(divide_rn(values[k], global), scale, p.stochastic, u);
     }
   }
   if (valid) {
@@ -125,7 +125,7 @@ template <int TYPE> __device__ __forceinline__ unsigned pack_pair(float lo, floa
     __half2 h = __floats2half2_rn(lo, hi);
     return *reinterpret_cast<unsigned *>(&h);
   } else {
-#if !defined(__MACACC__) && !defined(__ILUVATAR__) && defined(__CUDA_ARCH__) && \
+#if !defined(__MACACC__) && !defined(__ILUVATAR__) && !defined(__MUSACC__) && defined(__CUDA_ARCH__) && \
     __CUDA_ARCH__ >= 800
     unsigned bits;
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(bits) : "f"(hi), "f"(lo));
@@ -160,7 +160,7 @@ __global__ void dequant_vector_kernel(const uint8_t *data, const uint8_t *scales
   for (int k = 0; k < V; ++k) {
     unsigned code = FMT == MXFP8 ? (packed[k / 4] >> ((k % 4) * 8)) & 255
                                  : (packed[0] >> (k * 4)) & 15;
-    v[k] = ((FMT == MXFP8 ? fp8_value(code) : fp4_value(code)) * s) * global;
+    v[k] = multiply_rn(multiply_rn(FMT == MXFP8 ? fp8_value(code) : fp4_value(code), s), global);
   }
   if constexpr (TYPE == FP32) {
 #pragma unroll

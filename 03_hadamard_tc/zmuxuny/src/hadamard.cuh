@@ -87,12 +87,12 @@ __global__ void hadamard_kernel(const void *x, void *y, size_t rows, int dtype,
       float m = warp_max(c < D ? fabsf(v[j]) : 0, b);
       unsigned shared_scale = 0;
       if (lane % b == 0)
-        shared_scale = FMT == MXFP8 ? mx_scale(m) : encode8((m / global) / 6.0f);
+        shared_scale = FMT == MXFP8 ? mx_scale(m) : encode8(divide_rn(divide_rn(m, global), 6.0f));
       uint8_t s = uint8_t(__shfl_sync(FULL_WARP_MASK, shared_scale, 0, b));
       float scale = scale_value(s, FMT);
-      float z = FMT == NVFP4 ? v[j] / global : v[j];
+      float z = FMT == NVFP4 ? divide_rn(v[j], global) : v[j];
       float unscaled = z;
-      z = FMT == MXFP8 ? mx_scaled(z, s) : (scale == 0 ? 0 : z / scale);
+      z = FMT == MXFP8 ? mx_scaled(z, s) : (scale == 0 ? 0 : divide_rn(z, scale));
       size_t i = row * D + c;
       uint8_t code =
           FMT == MXFP8
@@ -178,22 +178,43 @@ inline void fused_had(const void *x, size_t rows, int d, int dtype, bool norm,
 
 // MACA and CoreX matrix fragments span 64 lanes; NVIDIA fragments span 32.
 // Quantization still groups consecutive values into logical 16/32-value blocks.
-#if defined(__MACACC__) || defined(__ILUVATAR__)
+#if defined(__MUSACC__)
+constexpr int MATRIX_LANES = 128;
+#elif defined(__MACACC__) || defined(__ILUVATAR__)
 constexpr int MATRIX_LANES = 64;
 #else
 constexpr int MATRIX_LANES = 32;
 #endif
 
+#if defined(__MUSACC__)
+// One physical wave per dense-reference CTA permits an explicit block barrier
+// around shared-memory loads/stores, including dimensions with a single tile.
+constexpr int DENSE_WAVES = 1;
+#else
+constexpr int DENSE_WAVES = 4;
+#endif
+
 #if !defined(__ILUVATAR__)
+__device__ inline void dense_matrix_sync() {
+#if defined(__MUSACC__)
+  __syncthreads();
+#else
+  __syncwarp();
+#endif
+}
 // Explicit FP16 Tensor Core comparison: dense X*H, 16x16 WMMA tiles.
 // Its O(D^2) arithmetic differs from the O(D log D) butterfly algorithm.
 __global__ void hadamard_tc(const __half *x, const __half *h, __half *y, size_t rows,
                             int d, bool norm, bool signs, uint32_t seed) {
+#if defined(__MUSACC__)
+  using namespace mtmusa;
+#else
   using namespace nvcuda;
-  __shared__ __align__(32) __half a[4][256];
-  __shared__ __align__(32) float result[4][256];
+#endif
+  __shared__ __align__(32) __half a[DENSE_WAVES][256];
+  __shared__ __align__(32) float result[DENSE_WAVES][256];
   int warp = threadIdx.x / MATRIX_LANES, lane = threadIdx.x % MATRIX_LANES;
-  int col = (blockIdx.y * 4 + warp) * 16;
+  int col = (blockIdx.y * DENSE_WAVES + warp) * 16;
   size_t row = blockIdx.x * 16;
   if (col >= d)
     return;
@@ -208,16 +229,16 @@ __global__ void hadamard_tc(const __half *x, const __half *h, __half *y, size_t 
         v = -v;
       a[warp][i] = __float2half_rn(v);
     }
-    __syncwarp();
+    dense_matrix_sync();
     wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> af;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> bf;
     wmma::load_matrix_sync(af, a[warp], 16);
     wmma::load_matrix_sync(bf, h + k * d + col, d);
     wmma::mma_sync(acc, af, bf, acc);
-    __syncwarp();
+    dense_matrix_sync();
   }
   wmma::store_matrix_sync(result[warp], acc, 16, wmma::mem_row_major);
-  __syncwarp();
+  dense_matrix_sync();
   for (int i = lane; i < 256; i += MATRIX_LANES) {
     size_t r = row + i / 16;
     if (r < rows)

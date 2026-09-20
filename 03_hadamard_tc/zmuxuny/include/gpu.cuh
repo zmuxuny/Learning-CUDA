@@ -39,7 +39,7 @@ __global__ void scales_kernel(const void *x, uint8_t *scales, const float *amax,
   }
   if (lane == 0)
     scales[g] =
-        p.fmt == MXFP8 ? mx_scale(a) : encode8((a / global_scale(*amax)) / 6.0f);
+        p.fmt == MXFP8 ? mx_scale(a) : encode8(divide_rn(divide_rn(a, global_scale(*amax)), 6.0f));
 }
 __device__ inline size_t group_index(size_t row, size_t col, Layout p) {
   return p.tensor ? 0 : row * ((p.cols + p.block - 1) / p.block) + col / p.block;
@@ -51,8 +51,8 @@ __device__ inline uint8_t quant_element(const void *x, size_t row, size_t col,
   float s = scale_value(scales[group_index(row, col, p)], p.fmt);
   float value = load(x, i, p.dtype);
   if (p.fmt == NVFP4)
-    value /= global_scale(*amax);
-  float y = s == 0 ? 0 : value / s;
+    value = divide_rn(value, global_scale(*amax));
+  float y = s == 0 ? 0 : divide_rn(value, s);
   float u = uniform(i, p.seed);
   return p.fmt == MXFP8 ? encode8(y, p.stochastic, u) : encode4(y, p.stochastic, u);
 }
@@ -84,7 +84,7 @@ __global__ void dequant_kernel(const uint8_t *data, const uint8_t *scales, float
   float v = p.fmt == MXFP8 ? fp8_value(c) : fp4_value(c);
   float s = scale_value(scales[group_index(row, col, p)], p.fmt);
   // Same multiplication order as the independent file decoder.
-  save(out, i, (v * s) * global, out_type);
+  save(out, i, multiply_rn(multiply_rn(v, s), global), out_type);
 }
 // A row-aligned tile fuses block scaling and packing. Each lane loads once;
 // NVFP4 uses two independent 16-lane reductions and one writer per packed byte.
@@ -102,15 +102,15 @@ __global__ void quant_blocks_kernel(const void *x, uint8_t *data, uint8_t *scale
   unsigned code_scale = 0;
   if (lane % B == 0)
     code_scale = p.tensor ? scales[0]
-                          : (FMT == MXFP8 ? mx_scale(a) : encode8((a / global) / 6.0f));
+                          : (FMT == MXFP8 ? mx_scale(a) : encode8(divide_rn(divide_rn(a, global), 6.0f)));
   code_scale = __shfl_sync(FULL_WARP_MASK, code_scale, 0, B);
   if (!p.tensor && col < limit && lane % B == 0)
     scales[row * ((p.cols + B - 1) / B) + col / B] = uint8_t(code_scale);
   float scale = scale_value(uint8_t(code_scale), FMT);
   if (FMT == NVFP4)
-    value /= global;
+    value = divide_rn(value, global);
   float z = FMT == MXFP8 ? mx_scaled(value, uint8_t(code_scale))
-                         : (scale == 0 ? 0 : value / scale);
+                         : (scale == 0 ? 0 : divide_rn(value, scale));
   float u = p.stochastic ? uniform(row * p.cols + col, p.seed) : 0.0f;
   unsigned code = FMT == MXFP8 ? encode8(z, p.stochastic, u)
                                : encode4_scaled(value, scale, p.stochastic, u);
@@ -142,9 +142,9 @@ __global__ void dequant_blocks_kernel(const uint8_t *data, const uint8_t *scales
   uint8_t code =
       data[FMT == MXFP8 ? row * p.cols + col : row * ((p.cols + 1) / 2) + col / 2];
   float v = FMT == MXFP8 ? fp8_value(code) : fp4_value(code & 15);
-  save(out, row * p.cols + col, (v * s) * global, out_type);
+  save(out, row * p.cols + col, multiply_rn(multiply_rn(v, s), global), out_type);
   if (FMT == NVFP4 && col + 1 < limit)
-    save(out, row * p.cols + col + 1, (fp4_value(code >> 4) * s) * global, out_type);
+    save(out, row * p.cols + col + 1, multiply_rn(multiply_rn(fp4_value(code >> 4), s), global), out_type);
 }
 
 template <int FMT>
@@ -159,6 +159,25 @@ inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
     return;
   }
   constexpr int V = 8, THREADS = 256;
+#elif defined(__MUSACC__)
+  // S4000: scalar small tiles avoid setup overhead. Four-value tiles favor
+  // medium inputs; eight-value tiles amortize packing on streamed tensors.
+  if (p.count() <= 65536) {
+    quant_blocks_kernel<FMT, true><<<(p.count() + 255) / 256, 256>>>(
+        x, data, scales, amax, p);
+    return;
+  }
+  if (p.count() <= 1048576) {
+    size_t grid = (p.count() + 2047) / 2048;
+    if (p.dtype == FP32)
+      quant_vector_kernel<FMT, FP32, 4><<<grid, 512>>>(x, data, scales, amax, p);
+    else if (p.dtype == FP16)
+      quant_vector_kernel<FMT, FP16, 4><<<grid, 512>>>(x, data, scales, amax, p);
+    else
+      quant_vector_kernel<FMT, BF16, 4><<<grid, 512>>>(x, data, scales, amax, p);
+    return;
+  }
+  constexpr int V = 8, THREADS = 128;
 #elif defined(__ILUVATAR__)
   // MR-V100: two FP32 values per lane favor MXFP8, while NVFP4's
   // 16-bit inputs benefit from eight. The scan is in results/iluvatar/.
@@ -196,7 +215,24 @@ inline void launch_quant_vector(const void *x, uint8_t *data, uint8_t *scales,
 
 inline void launch_max(const void *x, size_t n, int dtype, float *amax) {
   cudaMemsetAsync(amax, 0, sizeof(float));
-#if defined(__ILUVATAR__)
+#if defined(__MUSACC__)
+  // The scan includes clear + reduction. Small grids reduce atomic overhead;
+  // streamed FP32 inputs need more CTAs to cover the device's 64 MPs.
+  bool small = n <= 1048576;
+  if (dtype == FP32) {
+    if (small)
+      maximum_vector<FP32, 4><<<std::min(size_t(128), (n + 1023) / 1024), 256>>>(x, n, amax);
+    else
+      maximum_vector<FP32, 8><<<std::min(size_t(1024), (n + 4095) / 4096), 512>>>(x, n, amax);
+  } else {
+    int threads = small ? 128 : 256;
+    size_t grid = std::min(size_t(small ? 128 : 256), (n + threads * 8 - 1) / (threads * 8));
+    if (dtype == FP16)
+      maximum_vector<FP16, 8><<<grid, threads>>>(x, n, amax);
+    else
+      maximum_vector<BF16, 8><<<grid, threads>>>(x, n, amax);
+  }
+#elif defined(__ILUVATAR__)
   // Scalar FP32 accesses outperform vector loads on MR-V100. Half-size
   // inputs use four values per lane; cap the grid to amortize the final atomics.
   if (dtype == FP32)
@@ -260,6 +296,28 @@ inline void launch_dequant_vector(const uint8_t *data, const uint8_t *scales,
     return;
   }
   int half_threads = p.count() <= 1048576 ? 512 : 128;
+#elif defined(__MUSACC__)
+  if (p.count() <= 65536) {
+    dequant_blocks_kernel<FMT, true><<<(p.bytes() + 255) / 256, 256>>>(
+        data, scales, global, out, out_type, p);
+    return;
+  }
+  constexpr int half_threads = 128;
+  if (p.count() <= 1048576) {
+    size_t grid = (p.count() + 2047) / 2048;
+    if (out_type == FP32)
+      dequant_vector_kernel<FMT, FP32, 4><<<grid, 512>>>(data, scales, global, out, p);
+    else if (out_type == FP16)
+      dequant_vector_kernel<FMT, FP16, 4><<<grid, 512>>>(data, scales, global, out, p);
+    else
+      dequant_vector_kernel<FMT, BF16, 4><<<grid, 512>>>(data, scales, global, out, p);
+    return;
+  }
+  if (out_type == FP32 && FMT == NVFP4) {
+    dequant_vector_kernel<FMT, FP32, 8><<<(p.count() + 1023) / 1024, 128>>>(
+        data, scales, global, out, p);
+    return;
+  }
 #elif defined(__ILUVATAR__)
   // Small outputs favor fewer, wider CTAs; large outputs retain the streamed
   // vector path. Keep the cutoff aligned with the tested quantization boundary.

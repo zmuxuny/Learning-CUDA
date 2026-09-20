@@ -127,7 +127,7 @@ int main(int argc, char **argv) try {
     dh.upload(h.data(), h.size() * 2);
     double tc = elapsed(
         [&] {
-          hadamard_tc<<<dim3((x.rows + 15) / 16, (d + 63) / 64), 4 * MATRIX_LANES>>>(
+          hadamard_tc<<<dim3((x.rows + 15) / 16, (d + 16 * DENSE_WAVES - 1) / (16 * DENSE_WAVES)), DENSE_WAVES * MATRIX_LANES>>>(
               in.as<__half>(), dh.as<__half>(), ty.as<__half>(), x.rows, d, norm, signs,
               sign_seed);
         },
@@ -143,7 +143,7 @@ int main(int argc, char **argv) try {
     if (!get(o, "tc_output").empty())
       write_tensor(get(o, "tc_output"), t);
   }
-#if defined(__MACACC__) || defined(__ILUVATAR__) || LP_CUDA_ARCH >= 80
+#if defined(__MACACC__) || defined(__ILUVATAR__) || defined(__MUSACC__) || LP_CUDA_ARCH >= 80
   if (d >= 16 && get(o, "tensor_core", "1") == "1") {
     Device ty(x.data.size());
     double tc = elapsed(

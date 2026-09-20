@@ -57,8 +57,12 @@ template <int D, int TYPE, int FMT> void shape(size_t rows) {
 #define RUN(W) run_variant<D, TYPE, FMT, W>(x, y, data, scales, amax, a, b, c, p, trial)
   for (int trial = 0; trial < 3; ++trial) {
     if (trial & 1) {
+#if !defined(__MUSACC__)
       RUN(16);
+#endif
+#if !defined(__MUSACC__)
       RUN(8);
+#endif
       RUN(4);
       RUN(2);
       RUN(1);
@@ -66,8 +70,12 @@ template <int D, int TYPE, int FMT> void shape(size_t rows) {
       RUN(1);
       RUN(2);
       RUN(4);
+#if !defined(__MUSACC__)
       RUN(8);
+#endif
+#if !defined(__MUSACC__)
       RUN(16);
+#endif
     }
   }
 #undef RUN
@@ -80,6 +88,7 @@ template <int D> void dimensions(size_t rows) {
 }
 int main() {
   try {
+    std::cout << std::unitbuf;
     std::cout << "rows,dim,dtype,format,warps,trial,had_ms,fused_ms\n";
     for (size_t rows : {size_t(32), size_t(8192)}) {
       dimensions<64>(rows);

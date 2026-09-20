@@ -9,11 +9,13 @@
 #include "metax_matrix.cuh"
 #elif defined(__ILUVATAR__)
 #include "iluvatar_matrix.cuh"
+#elif defined(__MUSACC__)
+#include "musa_matrix.cuh"
 #endif
 
 namespace lp {
-#if defined(__MACACC__) || defined(__ILUVATAR__) || LP_CUDA_ARCH >= 80
-#if !defined(__MACACC__) && !defined(__ILUVATAR__)
+#if defined(__MACACC__) || defined(__ILUVATAR__) || defined(__MUSACC__) || LP_CUDA_ARCH >= 80
+#if !defined(__MACACC__) && !defined(__ILUVATAR__) && !defined(__MUSACC__)
 // Documented PTX m16n8k16 fragment layout, not an opaque WMMA layout assumption.
 // Two MMA instructions transform 16 independent 16-element segments. Remaining
 // Hadamard factors act on the segment index using shuffles and FP32 registers.
@@ -219,7 +221,9 @@ __global__ void hadamard_mma_kernel(const uint16_t *x, uint16_t *y, size_t n,
 }
 
 #endif // NVIDIA-specific fragment implementation
-#if defined(__MACACC__) || defined(__ILUVATAR__)
+#if defined(__MUSACC__)
+constexpr int MMA_LANES = 128;
+#elif defined(__MACACC__) || defined(__ILUVATAR__)
 constexpr int MMA_LANES = 64;
 #else
 constexpr int MMA_LANES = 32;
@@ -230,7 +234,23 @@ inline void launch_had_mma_type(const void *x, void *y, size_t rows, int d, bool
                                 bool signs, uint32_t seed, uint8_t *data,
                                 uint8_t *scales, float *amax, Layout p) {
   size_t n = rows * d;
-#if defined(__ILUVATAR__)
+#if defined(__MUSACC__)
+  // S4000 scans favor two physical waves for large standalone transforms.
+  // Full fusion has higher register pressure and uses one wave at D>=512.
+#define MMA_CASE(D)                                                             \
+  case D: {                                                                     \
+    constexpr int W = MODE == 2                                                \
+                          ? ((D >= 1024 || (FMT == NVFP4 && D >= 512)) ? 1      \
+                             : (FMT == NVFP4 && D >= 128) ? 2 : 4)             \
+                          : (D >= 1024 ? 2 : 4);                               \
+    constexpr int ITEMS = D > 256 ? D : 256;                                    \
+    hadamard_mma_kernel<D, TYPE, MODE, FMT, W>                                   \
+        <<<(n + W * ITEMS - 1) / (W * ITEMS), W * MMA_LANES>>>(                  \
+            static_cast<const uint16_t *>(x), static_cast<uint16_t *>(y), n,    \
+            norm, signs, seed, data, scales, amax, p);                           \
+    break;                                                                      \
+  }
+#elif defined(__ILUVATAR__)
   // One wave per CTA improves large MXFP8 fusion; retain four for the
   // bandwidth-bound standalone transform and the NVFP4 reduction pipeline.
 #define MMA_CASE(D)                                                             \

@@ -1,3 +1,19 @@
+# Moore Threads S4000 采样入口
+
+S4000 使用 MUSA 4.3.6。性能比较采用未插桩 MUSA event 计时，参数扫描和完整流程对照见 [S4000 报告](REPORT_MUSA.md)。
+
+```bash
+export MUSA_PATH=/usr/local/musa
+export MUSA_VISIBLE_DEVICES=0
+export LD_LIBRARY_PATH="$MUSA_PATH/lib:${LD_LIBRARY_PATH:-}"
+make PLATFORM=musa
+python3 tests/profile_musa.py
+```
+
+采样器通过 MUPTI activity API 收集 kernel 名称、启动配置及时间戳，每个格式和 dtype 独立执行，保留命令、退出码、原始 TSV、日志和二进制 SHA256。脚本检查每条记录的起止时间与丢失记录数；无有效时间戳时报告 `UNAVAILABLE_TIMESTAMPS`，不将进程退出成功当作有效采样。结果见 [采样汇总](results/musa/profile/summary.json)。本轮镜像未提供可用的 MUSA 设备端 Sanitizer。
+
+---
+
 # Iluvatar MR-V100 性能分析与内存检查
 
 CoreX 4.4.0 提供 `ixsys` 设备时间线、`ixkn-cli` 硬件计数器和 `ixsan` 内存检查。性能加速比使用未插桩设备事件计时；插桩数据用于分析 kernel 组成、资源占用和指令类型。
